@@ -1,0 +1,16 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hemlock Logo: 脉冲盾牌 (Pulse Shield) -->
+  <!-- 六边形盾牌轮廓 -->
+  <path d="M50 8 L 82 24 L 82 56 Q 82 76 50 92 Q 18 76 18 56 L 18 24 Z"
+        fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+  <!-- 声纳脉冲环 -->
+  <circle cx="50" cy="46" r="20" fill="none" stroke="currentColor" stroke-width="2" opacity="0.25"/>
+  <circle cx="50" cy="46" r="14" fill="none" stroke="currentColor" stroke-width="2" opacity="0.45"/>
+  <circle cx="50" cy="46" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity="0.7"/>
+  <!-- 中心点 -->
+  <circle cx="50" cy="46" r="4" fill="currentColor"/>
+  <!-- 扫描扇形 -->
+  <path d="M 50 46 L 66 32 A 20 20 0 0 1 70 46 Z"
+        fill="currentColor" opacity="0.15"/>
+  <line x1="50" y1="46" x2="68" y2="34" stroke="currentColor" stroke-width="1.5" opacity="0.6"/>
+</svg>
