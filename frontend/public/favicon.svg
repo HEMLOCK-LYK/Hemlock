@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4facfe"/>
+      <stop offset="50%" stop-color="#00d4d4"/>
+      <stop offset="100%" stop-color="#3884ff"/>
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.98"/>
+      <stop offset="100%" stop-color="#e8f4ff" stop-opacity="0.90"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0066cc" flood-opacity="0.25"/>
+    </filter>
+    <clipPath id="shieldClip">
+      <path d="M100 42 L150 62 L150 108 Q150 142 100 166 Q50 142 50 108 L50 62 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="10" y="10" width="180" height="180" rx="44" fill="url(#bgGrad)" filter="url(#shadow)"/>
+
+  <!-- Shield with rounded corners -->
+  <path d="M100 42 L150 62 L150 108 Q150 142 100 166 Q50 142 50 108 L50 62 Z"
+        fill="url(#shieldGrad)"/>
+
+  <!-- Crosshair target inside shield -->
+  <g stroke="#3884ff" stroke-width="5.5" stroke-linecap="round" fill="none" clip-path="url(#shieldClip)">
+    <!-- Outer ring -->
+    <circle cx="100" cy="105" r="34"/>
+    <!-- Inner ring -->
+    <circle cx="100" cy="105" r="18"/>
+    <!-- Crosshair lines -->
+    <line x1="100" y1="60" x2="100" y2="78"/>
+    <line x1="100" y1="132" x2="100" y2="150"/>
+    <line x1="55" y1="105" x2="73" y2="105"/>
+    <line x1="127" y1="105" x2="145" y2="105"/>
+  </g>
+
+  <!-- Center dot -->
+  <circle cx="100" cy="105" r="5" fill="#00b8d4"/>
+</svg>

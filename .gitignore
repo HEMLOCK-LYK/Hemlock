@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Rust (local install attempts)
+.rustup/
+.cargo/
+
+# Build artifacts
+src-tauri/resources/hemlock-backend/
+backend/dist/
+backend/build/
+*.spec.bak
+build_log.txt
+pip_install.log
+
+# Data & Runtime
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+hemlock_data/
+~/.hemlock/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / Config
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Packaging
+*.exe
+*.msi
+*.dmg
+*.app
+*.deb
+*.rpm
+*.snap
+!src-tauri/target/release/bundle/nsis/*.exe

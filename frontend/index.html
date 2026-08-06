@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hemlock - AI 安全测试平台</title>
+    <style>
+      /* ===== 原生启动屏（React 挂载前即显示，全程驻留至加载完成淡出） ===== */
+      .splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: radial-gradient(ellipse at center, var(--splash-bg1, #161b22) 0%, var(--splash-bg2, #0d1117) 70%);
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        animation: splash-in 0.4s ease;
+        transition: opacity 0.5s ease, visibility 0.5s ease;
+      }
+      .splash.fade-out {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      @keyframes splash-in { from { opacity: 0; } to { opacity: 1; } }
+
+      .splash-bg-grid {
+        position: absolute;
+        inset: -2px;
+        background-image:
+          linear-gradient(var(--splash-grid, #21262d) 1px, transparent 1px),
+          linear-gradient(90deg, var(--splash-grid, #21262d) 1px, transparent 1px);
+        background-size: 44px 44px;
+        opacity: 0.18;
+        animation: splash-grid 18s linear infinite;
+        -webkit-mask-image: radial-gradient(ellipse at center, black 20%, transparent 65%);
+        mask-image: radial-gradient(ellipse at center, black 20%, transparent 65%);
+        pointer-events: none;
+      }
+      @keyframes splash-grid { from { background-position: 0 0; } to { background-position: 44px 44px; } }
+
+      .splash-bg-scan {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(180deg, transparent 0%, transparent 45%, color-mix(in srgb, var(--splash-accent, #3884ff) 7%, transparent) 50%, transparent 55%, transparent 100%);
+        background-size: 100% 220%;
+        animation: splash-scan 3.2s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes splash-scan { 0% { background-position: 0 -100%; } 100% { background-position: 0 200%; } }
+
+      .splash-bg-glow {
+        position: absolute;
+        width: 440px;
+        height: 440px;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--splash-accent, #3884ff) 10%, transparent) 0%, transparent 60%);
+        animation: splash-glow 3s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes splash-glow {
+        0%, 100% { opacity: 0.6; transform: scale(0.9); }
+        50% { opacity: 1; transform: scale(1.08); }
+      }
+
+      .splash-content {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        animation: splash-content-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
+      }
+      @keyframes splash-content-in {
+        from { opacity: 0; transform: translateY(12px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .splash-logo {
+        position: relative;
+        width: 96px;
+        height: 96px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 14px;
+      }
+      .splash-ring {
+        position: absolute;
+        border-radius: 50%;
+        border-style: solid;
+        border-color: transparent;
+      }
+      .splash-ring.outer {
+        width: 96px; height: 96px; border-width: 2px;
+        border-top-color: var(--splash-accent, #3884ff); border-right-color: color-mix(in srgb, var(--splash-accent, #3884ff) 25%, transparent);
+        animation: splash-spin-cw 2.4s linear infinite;
+      }
+      .splash-ring.middle {
+        width: 72px; height: 72px; border-width: 1.5px;
+        border-top-color: var(--splash-cyan, #00d4d4); border-left-color: color-mix(in srgb, var(--splash-cyan, #00d4d4) 20%, transparent);
+        animation: splash-spin-ccw 1.8s linear infinite;
+      }
+      .splash-ring.inner {
+        width: 52px; height: 52px; border-width: 1px;
+        border-bottom-color: var(--splash-accent, #3884ff); border-top-color: color-mix(in srgb, var(--splash-accent, #3884ff) 15%, transparent);
+        animation: splash-spin-cw 1.2s linear infinite;
+      }
+      .splash-core {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px; height: 40px;
+        border-radius: 50%;
+        background: var(--splash-core, #161b22);
+        box-shadow: 0 0 20px color-mix(in srgb, var(--splash-accent, #3884ff) 35%, transparent), inset 0 0 12px color-mix(in srgb, var(--splash-accent, #3884ff) 10%, transparent);
+        animation: splash-core-pulse 2s ease-in-out infinite;
+      }
+      .splash-core svg {
+        color: var(--splash-accent, #3884ff);
+        filter: drop-shadow(0 0 6px color-mix(in srgb, var(--splash-accent, #3884ff) 60%, transparent));
+        animation: splash-icon-pulse 2s ease-in-out infinite;
+      }
+      @keyframes splash-spin-cw { to { transform: rotate(360deg); } }
+      @keyframes splash-spin-ccw { to { transform: rotate(-360deg); } }
+      @keyframes splash-core-pulse {
+        0%, 100% { box-shadow: 0 0 20px color-mix(in srgb, var(--splash-accent, #3884ff) 35%, transparent), inset 0 0 12px color-mix(in srgb, var(--splash-accent, #3884ff) 10%, transparent); }
+        50% { box-shadow: 0 0 32px color-mix(in srgb, var(--splash-accent, #3884ff) 60%, transparent), inset 0 0 16px color-mix(in srgb, var(--splash-accent, #3884ff) 20%, transparent); }
+      }
+      @keyframes splash-icon-pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.75; transform: scale(0.9); }
+      }
+
+      .splash-title {
+        font-size: 30px;
+        font-weight: 800;
+        color: var(--splash-title, #e6edf3);
+        letter-spacing: 2px;
+        text-shadow: 0 0 24px color-mix(in srgb, var(--splash-accent, #3884ff) 25%, transparent);
+        animation: splash-title 0.6s ease 0.3s both;
+      }
+      @keyframes splash-title {
+        from { opacity: 0; letter-spacing: 8px; }
+        to { opacity: 1; letter-spacing: 2px; }
+      }
+      .splash-subtitle {
+        font-size: 12px;
+        color: var(--splash-sub, #7d8590);
+        margin-bottom: 26px;
+        letter-spacing: 1px;
+        animation: splash-fade-up 0.5s ease 0.5s both;
+      }
+      @keyframes splash-fade-up {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .splash-bar {
+        position: relative;
+        width: 260px;
+        height: 3px;
+        background: var(--splash-grid, #21262d);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .splash-bar-fill {
+        position: absolute;
+        top: 0; left: 0;
+        height: 100%;
+        width: 40%;
+        background: linear-gradient(90deg, var(--splash-accent, #3884ff), var(--splash-cyan, #00d4d4));
+        border-radius: 2px;
+        box-shadow: 0 0 12px color-mix(in srgb, var(--splash-accent, #3884ff) 50%, transparent);
+        animation: splash-bar-load 1.8s ease-in-out infinite;
+      }
+      @keyframes splash-bar-load {
+        0% { width: 0%; opacity: 0.6; }
+        50% { width: 70%; opacity: 1; }
+        100% { width: 100%; opacity: 0.6; }
+      }
+      .splash-bar-shine {
+        position: absolute;
+        top: 0; left: 0;
+        width: 60px; height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent);
+        animation: splash-shine 1.8s ease-in-out infinite;
+        pointer-events: none;
+      }
+      @keyframes splash-shine {
+        0% { transform: translateX(-60px); opacity: 0; }
+        20% { opacity: 1; }
+        80% { opacity: 1; }
+        100% { transform: translateX(260px); opacity: 0; }
+      }
+    </style>
+    <script>
+      // 根据用户保存的主题动态设置 splash 配色，避免主题不匹配的闪烁
+      (function() {
+        var themeColors = {
+          dark:       { bg1: '#161b22', bg2: '#0d1117', grid: '#21262d', title: '#e6edf3', sub: '#7d8590', accent: '#3884ff', cyan: '#00d4d4', core: '#161b22' },
+          light:      { bg1: '#f6f8fa', bg2: '#ffffff', grid: '#eaeef2', title: '#1f2328', sub: '#8c959f', accent: '#0969da', cyan: '#1b7c83', core: '#ffffff' },
+          matrix:     { bg1: '#0a0f0a', bg2: '#000000', grid: '#1a3a1a', title: '#00ff00', sub: '#008800', accent: '#00ff88', cyan: '#00ffaa', core: '#0a0f0a' },
+          burp:       { bg1: '#2a2a2a', bg2: '#1e1e1e', grid: '#3a3a3a', title: '#e0e0e0', sub: '#888888', accent: '#ff6622', cyan: '#ffaa00', core: '#2a2a2a' },
+          midnight:   { bg1: '#0f1429', bg2: '#0a0e27', grid: '#1a2040', title: '#e0e8ff', sub: '#6878a8', accent: '#4477ff', cyan: '#44aaff', core: '#0f1429' },
+          solarized:  { bg1: '#073642', bg2: '#002b36', grid: '#0a4250', title: '#eee8d5', sub: '#839496', accent: '#268bd2', cyan: '#2aa198', core: '#073642' }
+        };
+        var saved = 'light';
+        try { saved = localStorage.getItem('hemlock_theme') || 'light'; } catch(e) {}
+        var c = themeColors[saved] || themeColors.light;
+        var s = document.documentElement.style;
+        s.setProperty('--splash-bg1', c.bg1);
+        s.setProperty('--splash-bg2', c.bg2);
+        s.setProperty('--splash-grid', c.grid);
+        s.setProperty('--splash-title', c.title);
+        s.setProperty('--splash-sub', c.sub);
+        s.setProperty('--splash-accent', c.accent);
+        s.setProperty('--splash-cyan', c.cyan);
+        s.setProperty('--splash-core', c.core);
+        // 设置 html 背景色匹配主题，splash 淡出时不会露出白色底色
+        s.backgroundColor = c.bg2;
+      })();
+    </script>
+  </head>
+  <body>
+    <!-- 启动屏：放在 #root 外，React 渲染不影响它，加载完成后由 JS 淡出移除 -->
+    <div class="splash" id="splash-screen">
+      <div class="splash-bg-grid"></div>
+      <div class="splash-bg-scan"></div>
+      <div class="splash-bg-glow"></div>
+      <div class="splash-content">
+        <div class="splash-logo">
+          <div class="splash-ring outer"></div>
+          <div class="splash-ring middle"></div>
+          <div class="splash-ring inner"></div>
+          <div class="splash-core">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="22" y1="12" x2="18" y2="12"/>
+              <line x1="6" y1="12" x2="2" y2="12"/>
+              <line x1="12" y1="6" x2="12" y2="2"/>
+              <line x1="12" y1="22" x2="12" y2="18"/>
+            </svg>
+          </div>
+        </div>
+        <div class="splash-title">Hemlock</div>
+        <div class="splash-subtitle">AI Security Testing Platform</div>
+        <div class="splash-bar">
+          <div class="splash-bar-fill"></div>
+          <div class="splash-bar-shine"></div>
+        </div>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
