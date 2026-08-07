@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化日志和数据库。"""
     setup_logging()
     logger = logging.getLogger(__name__)
-    logger.info(f"启动 {settings.app_name} v0.4.1")
+    logger.info(f"启动 {settings.app_name} v0.4.2")
     logger.info(f"API: {settings.api_host}:{settings.api_port} | Proxy: {settings.proxy_host}:{settings.proxy_port}")
     logger.info(f"LLM: {settings.llm_provider} / {settings.llm_model}")
     logger.info(f"Debug 模式: {settings.debug}")
@@ -154,7 +154,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.app_name,
-        version="0.4.1",
+        version="0.4.2",
         lifespan=lifespan,
         # 生产环境关闭文档
         docs_url="/docs" if settings.debug else None,
@@ -207,7 +207,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "app": s.app_name,
-            "version": "0.4.1",
+            "version": "0.4.2",
             "debug": s.debug,
             "llm_configured": bool(s.llm_api_key),
             "llm_model": s.llm_model,

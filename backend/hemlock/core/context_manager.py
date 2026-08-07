@@ -777,20 +777,17 @@ class ContextAssembler:
             else:
                 conv_msgs.append(msg)
 
-        # 合并 system 消息（通常只有一条）——保持稳定，不注入动态内容
-        if system_msgs:
-            base_system = system_msgs[0].get("content", "")
-            # 如果已有多个 system 消息，合并
-            for sm in system_msgs[1:]:
-                base_system += "\n\n" + sm.get("content", "")
-        else:
-            base_system = system_prompt
+        # 保留 system 消息原样（可多条：稳定段 + 动态段），不合并——
+        # 合并会破坏缓存友好的拆分结构（稳定段在前、动态段在后），
+        # 使技能/记忆变化作废整个 system 前缀缓存。
+        if not system_msgs:
+            system_msgs = [{"role": "system", "content": system_prompt}]
 
         # 压缩对话消息（热记忆管理）
         compressed_conv = self._compress_conv_messages(conv_msgs)
 
         # 组装最终消息列表
-        result = [{"role": "system", "content": base_system}]
+        result = list(system_msgs)
         result.extend(compressed_conv)
 
         return result
@@ -802,7 +799,7 @@ class ContextAssembler:
     ) -> list[dict]:
         """压缩已有消息列表（用于对话循环中，防止 messages 无限增长）。
 
-        与 assemble() 不同，此方法假设 messages[0] 已经是完整的 system 消息，
+        与 assemble() 相同，保留所有 system 消息（稳定段 + 动态段）原样不动，
         只压缩对话部分。
 
         缓存友好：system 消息保持原样（不重注入温记忆），确保连续回合的
@@ -818,16 +815,14 @@ class ContextAssembler:
         if len(messages) <= 2:
             return messages
 
-        # 分离 system 和对话消息
-        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        # 分离 system 和对话消息（保留所有 system 消息：稳定段 + 动态段，不合并）
+        system_msgs = [m for m in messages if m.get("role") == "system"]
         conv_msgs = [m for m in messages if m.get("role") != "system"]
 
         # 压缩对话消息
         compressed_conv = self._compress_conv_messages(conv_msgs)
 
-        result = []
-        if system_msg:
-            result.append(system_msg)
+        result = list(system_msgs)
         result.extend(compressed_conv)
         return result
 

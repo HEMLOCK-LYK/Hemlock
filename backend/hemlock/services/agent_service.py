@@ -1586,22 +1586,23 @@ class AgentOrchestrator:
             except Exception as e:
                 logger.debug(f"加载记忆失败（非致命）: {e}")
 
-            system_content = SYSTEM_PROMPT
+            # system 缓存友好拆分（对齐 chat 模式）：稳定段在前（缓存命中），
+            # 动态段（记忆 + 技能索引）在后，变化不影响稳定前缀。
+            messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+            dynamic_content = ""
             if memory_prompt:
-                system_content += f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
+                dynamic_content += f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
             # 注入技能索引（与 chat 模式一致，渐进式披露：仅 name + description）
             try:
                 from hemlock.core.skill_registry import build_skills_prompt
                 skills_prompt = build_skills_prompt(self.db)
                 if skills_prompt:
-                    system_content += skills_prompt
+                    dynamic_content += skills_prompt
             except Exception:
                 pass
-
-            messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": f"任务目标: {goal}\n目标 URL: {target_url}\n请开始安全测试。先进行信息收集，再根据发现选择合适的测试策略。"},
-            ]
+            if dynamic_content:
+                messages.append({"role": "system", "content": dynamic_content})
+            messages.append({"role": "user", "content": f"任务目标: {goal}\n目标 URL: {target_url}\n请开始安全测试。先进行信息收集，再根据发现选择合适的测试策略。"})
 
         consecutive_errors = 0  # 连续错误计数
         max_consecutive_errors = 3  # 最大连续错误数
@@ -4899,21 +4900,29 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
     恢复 tool_call 时需要 tool_call_id 与原始 tool_call 对象，以保证 OpenAI 消息序列
     （assistant.tool_calls -> tool.tool_call_id）配对完整。
     """
-    # 系统提示词（保持跨任务完全稳定，不注入 task.goal）
-    # Token 优化：task.goal 注入 system 会让每个任务的前缀不同 → 跨任务缓存前缀失效。
-    # 移出后，所有任务的 system+工具前缀一致，DeepSeek/OpenAI 自动前缀缓存可跨任务命中。
+    # ===== system 缓存友好拆分：稳定段 + 动态段 =====
+    # system 拆成两条消息，是前缀缓存命中的关键：
+    #   messages[0] = 稳定段（SYSTEM_PROMPT + AUTO_PENTEST，或 override）——
+    #                 跨请求逐字节一致，Anthropic 显式断点 / DeepSeek-OpenAI 自动前缀缓存都命中它。
+    #   messages[1] = 动态段（技能索引 + MCP 列表 + 长期记忆）——随库变化，
+    #                 位于缓存断点之后，改动不影响稳定前缀（越靠前的越不能改）。
+    # 补充：task.goal 不注入 system（会让每个任务前缀不同 → 跨任务缓存失效），
+    #       移出后所有任务的稳定段一致，缓存可跨任务命中。
     system_content = system_prompt_override if system_prompt_override else SYSTEM_PROMPT
     # 自动化渗透测试模式提示
     if getattr(settings, "auto_pentest", True):
         system_content += AUTO_PENTEST_PROMPT
-    # 动态注入已启用的 Skill 列表（渐进式披露：仅 name + description）
+    messages: list[dict] = [{"role": "system", "content": system_content}]
+
+    # 动态段：动态注入已启用的 Skill 列表（渐进式披露：仅 name + description）
     # 注意：Skill 注入不依赖 auto_pentest，始终启用
+    dynamic_content = ""
     if db:
         try:
             from hemlock.core.skill_registry import build_skills_prompt
             skills_prompt = build_skills_prompt(db)
             if skills_prompt:
-                system_content += skills_prompt
+                dynamic_content += skills_prompt
         except Exception:
             pass
 
@@ -4926,10 +4935,11 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
                 for t in mcp_tools:
                     fn = t.get("function", {})
                     mcp_info += f"- **{fn.get('name', '?')}**: {fn.get('description', '')}\n"
-                system_content += mcp_info
+                dynamic_content += mcp_info
         except Exception:
             pass
-    messages: list[dict] = [{"role": "system", "content": system_content}]
+    if dynamic_content:
+        messages.append({"role": "system", "content": dynamic_content})
 
     i = 0
     n = len(steps)
@@ -5289,11 +5299,24 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
     messages = _build_chat_messages(steps, task, db, system_prompt_override, pentest_context=context)
 
     # 1.5 加载长期记忆
+    # 注意：记忆属于动态内容，追加到动态段（缓存断点之后），
+    # 不能追加到 messages[0]（稳定段）——否则记忆变化会让整个 system 前缀缓存作废。
     try:
         from hemlock.core.memory_manager import build_memories_prompt
         memory_prompt = build_memories_prompt(db)
         if memory_prompt:
-            messages[0]["content"] += f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
+            mem_block = f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
+            # 找动态段：第一条之后的 system 消息（拆分结构 [稳定, 动态]）
+            dyn_idx = None
+            for _i, _m in enumerate(messages):
+                if _i > 0 and _m.get("role") == "system":
+                    dyn_idx = _i
+                    break
+            if dyn_idx is not None:
+                messages[dyn_idx]["content"] += mem_block
+            else:
+                # 没有动态段（无技能/MCP 时），插入新的 system 消息作为动态段
+                messages.insert(1, {"role": "system", "content": mem_block})
             logger.info("对话模式加载长期记忆")
     except Exception as e:
         logger.debug(f"加载记忆失败（非致命）: {e}")

@@ -9,7 +9,7 @@
 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.2-green.svg)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](#)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Contact](https://img.shields.io/badge/Contact-1878093812%40qq.com-blue)](mailto:1878093812@qq.com)
@@ -45,8 +45,10 @@ Agent 跑起来，你只需要看着它干活、在关键节点点头放行、�
 - 支持工具结果**自动化蒸馏**：超大 HTTP 输出按需截断 + 摘要压缩，保留 `flow_id` 等关键引用，Agent 可随时深查，省 Token 不伤判断力
 - 预留 200 次工具调用上限作为防死循环兜底，长流程测试（弱口令爆破等）不被硬切
 
-### 2. 上下文智能管理（索引 + 按需 + 渐进式压缩）
-- **缓存前缀稳定**：system prompt 完全静态化，DeepSeek / OpenAI 自动前缀缓存「会话内只付一次」，跨任务也不失效
+### 2. 上下文智能管理（缓存友好的 system 拆分 + 索引 + 渐进式压缩）
+- **缓存友好的 system 拆分**：system prompt 拆为「稳定段 + 动态段」两条消息——稳定段（角色设定 + 渗透策略）逐字节不变，位于缓存断点之前，命中 Anthropic 显式断点 / DeepSeek-OpenAI 自动前缀缓存；动态段（技能索引 + MCP 列表 + 长期记忆）位于断点之后，改动不影响稳定前缀
+- **确定性索引排序**：技能 / 记忆索引按名称确定性排序，集合不变时注入文本逐字节一致——「没变就是没变」，缓存不会因排列不同而失效
+- **记忆放在 system 内、断点之外**：长期记忆留在 system（auto-compact 永不压缩），又位于缓存断点之后（技能/记忆增删不影响缓存命中）
 - **索引 + 按需**：技能 / 记忆只向 Agent 注入「名称 + 描述」索引，完整内容按需读取（`get_memory` / `invoke_skill`）
 - **渐进式压缩**：Session Memory 免费摘要 → LLM 驱动 AutoCompact → 确定性压缩兜底，熔断自动回退，绝不让长任务断链
 - **checkpoint 断点续跑**：任务每 3 步自动保存快照，崩溃后重跑同一任务自动从断点续跑

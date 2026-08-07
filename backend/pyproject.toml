@@ -1,6 +1,6 @@
 [project]
 name = "hemlock"
-version = "0.4.1"
+version = "0.4.2"
 description = "Hemlock - AI Agent + 抓包融合安全测试工具后端"
 requires-python = ">=3.10"
 dependencies = [

@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.2] - 2026-08-07
+
+### 优化
+- 缓存友好的 system 拆分：system prompt 拆为「稳定段 + 动态段」两条消息，稳定段（角色 + 渗透策略）逐字节不变、位于缓存断点之前，命中 Anthropic 显式断点 / DeepSeek-OpenAI 自动前缀缓存；动态段（技能索引 + MCP 列表 + 长期记忆）位于断点之后，改动不影响稳定前缀
+- 技能 / 记忆索引确定性排序：按名称排序，集合不变时注入文本逐字节一致，缓存不会因排列不同而失效
+- 长期记忆移到 system 动态段：记忆留在 system（auto-compact 不压缩）且位于缓存断点之外，技能 / 记忆增删不影响缓存命中
+
 ## [0.4.1] - 2026-08-07
 
 ### 新增

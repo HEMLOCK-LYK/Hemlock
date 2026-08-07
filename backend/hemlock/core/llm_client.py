@@ -191,6 +191,9 @@ def _apply_cache_control(messages: list[dict], model: str | None) -> list[dict]:
     将 system 消息 content 转为 Anthropic 内容块格式并附加 cache_control，
     使 Claude 缓存 system prompt，命中"前缀缓存"降低重复 token 计费。
 
+    只对第一条 system 消息打标——配合 system 的「稳定段 + 动态段」拆分，
+    缓存断点落在稳定段末尾，技能/记忆等动态段在断点之后，变化不影响缓存命中。
+
     DeepSeek/OpenAI/Kimi 等使用自动前缀缓存，不接受此字段，默认关闭不受影响。
     """
     if not getattr(settings, "llm_cache_control_enabled", False):

@@ -309,6 +309,11 @@ def build_skills_prompt(db: Any = None) -> str:
     if not skills:
         return ""
 
+    # 确定性排序：技能顺序固定后，技能集合不变时索引字符串逐字节一致，
+    # 缓存前缀（Anthropic 显式断点 / DeepSeek-OpenAI 自动前缀）才能命中。
+    # 顺序不固定的话，内容没变也会因排列不同而让缓存作废。
+    skills = sorted(skills, key=lambda s: s.name)
+
     lines = ["\n\n## 可用技能 (Skills)\n以下技能已启用，可通过 invoke_skill 工具调用（名称+用途索引）：\n"]
     for s in skills:
         desc = s.description or ""

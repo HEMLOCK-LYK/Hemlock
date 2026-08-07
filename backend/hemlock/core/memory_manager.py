@@ -427,6 +427,12 @@ def format_memory_for_prompt(memories: list) -> str:
     if not memories:
         return ""
 
+    # 确定性排序：记忆集合不变时索引字符串逐字节一致，缓存前缀才能命中。
+    # （list_memories 已按 name 排序，这里兜底兼容直接传入未排序列表的调用方）
+    def _mem_name(m) -> str:
+        return m.get("name", "") if isinstance(m, dict) else getattr(m, "name", "")
+    memories = sorted(memories, key=_mem_name)
+
     lines = [
         "\n\n## 长期记忆索引 (Agent Memories Index)\n"
         "以下是跨会话保留的记忆索引。相关记忆与你当前任务有关时，"
