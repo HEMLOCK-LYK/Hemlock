@@ -7,6 +7,7 @@ import {
   type MemoryCreateRequest,
 } from "../api/memory";
 import { Spinner } from "../components/Common";
+import { MarkdownView } from "../components/MarkdownView";
 
 const TYPE_LABELS: Record<MemoryType, string> = {
   user: "使用者",
@@ -495,25 +496,19 @@ export function MemoryManager() {
                 </div>
               )}
 
-              {/* Content */}
+              {/* Content（markdown 渲染，与 Agent 消息同款） */}
               {selected.content && (
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>内容</div>
-                  <pre style={{
-                    fontSize: 12,
-                    color: "var(--text-primary)",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
+                  <div style={{
                     background: "var(--bg-secondary)",
                     border: "1px solid var(--border-default)",
                     borderRadius: 4,
                     padding: 10,
                     margin: 0,
-                    fontFamily: "inherit",
-                    lineHeight: 1.6,
                   }}>
-                    {selected.content}
-                  </pre>
+                    <MarkdownView content={selected.content} />
+                  </div>
                 </div>
               )}
 

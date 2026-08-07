@@ -21,8 +21,6 @@ import {
   Layers,
   ShieldAlert,
   FileText,
-  Copy,
-  Check,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -34,6 +32,7 @@ import { collabApi, type RoleSummary } from "../api/collab";
 import { llmProvidersApi, type LLMProvider } from "../api/llmProviders";
 import { useProject } from "../context/ProjectContext";
 import { usePacket } from "../context/PacketContext";
+import { CodeBlockWrapper } from "../components/MarkdownView";
 import type {
   TaskSummary,
   TaskResponse,
@@ -2294,44 +2293,6 @@ function TaskListItem({
     </div>
   );
 }
-
-// ===== 子组件：代码块（Typora/Codex 风格 — 语言标签 + 复制按钮）=====
-
-const CodeBlockWrapper = memo(function CodeBlockWrapper({ children }: { children: ReactNode }) {
-  const [copied, setCopied] = useState(false);
-
-  // 从子级 code 元素中提取语言和代码文本
-  const codeEl = Array.isArray(children) ? children[0] : children;
-  const props = ((codeEl as React.ReactElement)?.props ?? {}) as { className?: string; children?: ReactNode };
-  const className: string = props.className || "";
-  const lang = className.replace(/hljs\s+language-|language-/g, "") || "text";
-  const rawChildren = props.children;
-  const codeText = typeof rawChildren === "string"
-    ? rawChildren
-    : Array.isArray(rawChildren)
-      ? rawChildren.join("")
-      : String(rawChildren ?? "");
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(codeText).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  return (
-    <div className="md-codeblock">
-      <div className="md-codeblock-header">
-        <span className="md-codeblock-lang">{lang}</span>
-        <button className="md-codeblock-copy" onClick={handleCopy}>
-          {copied ? <Check size={11} /> : <Copy size={11} />}
-          {copied ? "已复制" : "复制"}
-        </button>
-      </div>
-      <pre className="md-pre">{children}</pre>
-    </div>
-  );
-});
 
 // ===== 子组件：消息渲染 =====
 

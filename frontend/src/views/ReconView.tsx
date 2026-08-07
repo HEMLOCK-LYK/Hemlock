@@ -48,6 +48,7 @@ import {
 } from "../api/recon";
 import type { WSEvent } from "../types";
 import { Spinner, EmptyState } from "../components/Common";
+import { MarkdownView } from "../components/MarkdownView";
 
 // ===== 常量 =====
 
@@ -1325,11 +1326,6 @@ function TaskCard({
                   borderRadius: 6,
                   border: "1px solid var(--border-default)",
                   borderLeft: "3px solid var(--accent-cyan)",
-                  fontSize: 12,
-                  lineHeight: 1.7,
-                  color: "var(--text-primary)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
                 }}
               >
                 {parsed.aiReplies.map((reply, i) => (
@@ -1344,7 +1340,7 @@ function TaskCard({
                           : "none",
                     }}
                   >
-                    {reply.text}
+                    <MarkdownView content={reply.text} />
                   </div>
                 ))}
               </div>
@@ -1823,15 +1819,11 @@ function SearchPanel({
                   borderRadius: 6,
                   background: "var(--bg-primary)",
                   border: "1px solid var(--border-default)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                  whiteSpace: "pre-wrap",
                   overflow: "auto",
                   maxHeight: "60vh",
                 }}
               >
-                {searchResult.report_preview}
+                <MarkdownView content={searchResult.report_preview} />
               </div>
             )}
           </div>
@@ -2213,18 +2205,7 @@ function ReportsPanel({
                   <span>加载中...</span>
                 </div>
               ) : (
-                <pre
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 12,
-                    lineHeight: 1.6,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  {reportContent}
-                </pre>
+                <MarkdownView content={reportContent} />
               )}
             </div>
           </div>
