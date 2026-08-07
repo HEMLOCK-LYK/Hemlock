@@ -1,12 +1,13 @@
-# Hemlock v0.4.0 Release Notes
+# Hemlock v0.4.1 Release Notes
 
 ## 本版本亮点 / What's New
 
-- **子 Agent 能力**：对话模式中主 Agent 可启动专职角色分工执行独立子任务，共享上下文、发现自动记录、内部工具调用实时流式展示，刷新后思考链与嵌套卡片不丢失
-- **中途插话即时识别**：Agent 运行中补充消息不打断当前轮、下一思考边界即被识别
-- **终止秒级生效**：点停止即刻中断 LLM 流式思考并清空消息队列
-- **工具调用像思维链一样可折叠展开**：折叠单行摘要、展开看参数与结果
-- **思维链展示优化**：连续思考合并为一个折叠块 + 字数提示，页面不再堆叠
+- **数据转发补全**：漏洞管理页、数据详情页一键发送到重放器 / 爆破器 / AI 助手，与流量列表完全一致
+- **统一流量显示**：漏洞与数据详情复用同一套报文渲染组件，效果统一、减少差异
+- **中途插话即时识别**：Agent 运行中补充消息不打断当前轮、下一思考边界即被识别，并同步广播给子 Agent
+- **子 Agent 思考流式实时显示**：逐段推送思考内容，停止秒级生效，刷新后不丢失
+- **Markdown 完整渲染**：记忆详情、报告查看、收集摘要等 Markdown 内容正确渲染（标题 / 表格 / 代码高亮 / 一键复制）
+- **浏览器化请求头**：代理发出的请求使用 Chrome 默认 User-Agent 与完整请求头，流量更贴近真实浏览器
 
 ## 中文说明
 
@@ -29,7 +30,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.4.0_x64-setup.exe`
+1. 下载 `Hemlock_0.4.1_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -64,7 +65,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Installation
 
-1. Download `Hemlock_0.4.0_x64-setup.exe`
+1. Download `Hemlock_0.4.1_x64-setup.exe`
 2. Double-click to install and launch
 3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate
