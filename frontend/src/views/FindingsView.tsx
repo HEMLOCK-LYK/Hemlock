@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Shield, Bug, RefreshCw, FileDown, FlaskConical } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Shield, Bug, RefreshCw, FileDown, FlaskConical, Repeat, Bot, Swords } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { useWebSocket } from "../hooks/useWebSocket";
 import {
   listFindings,
@@ -11,7 +12,9 @@ import { useProject } from "../context/ProjectContext";
 import { API_BASE } from "../api/client";
 import type { Finding, FindingDetail, WSEvent, RetestResponse } from "../types";
 import { RiskBadge, Spinner, EmptyState } from "../components/Common";
-import { tokenizePacket } from "../utils/packetTokenize";
+import { CodeEditor } from "../components/CodeEditor";
+import { usePacket } from "../context/PacketContext";
+import { parseRawRequest } from "../utils/httpParser";
 
 const SEVERITY_ORDER: Record<string, number> = {
   critical: 0,
@@ -50,49 +53,46 @@ const RETEST_STATUS_COLORS: Record<string, string> = {
 };
 
 /**
- * PacketCode — 使用共享 tokenizePacket 工具渲染带语法高亮的 HTTP 数据包。
+ * 从证据请求原始报文文本解析出 { method, url, headers, body }，
+ * 用于转发到重放器/爆破器。
+ * 证据格式：
+ *   GET /api/users HTTP/1.1
+ *   Host: example.com
+ *   Content-Type: application/json
  *
- * 遵循 packetTokenize.ts 的颜色策略：仅结构/键字段着色，内容/值字段使用跟随主题的默认文本色。
- * 渲染每行为一组 <span>，每个 span 携带 segment.color。
+ *   {body}
  */
-function PacketCode({
-  content,
-  type,
-  emptyText,
-}: {
-  content: string;
-  type: "request" | "response";
-  emptyText: string;
-}) {
-  const lines = useMemo(
-    () => tokenizePacket(content, type),
-    [content, type]
-  );
+function parseEvidenceRequest(raw: string) {
+  const parsed = parseRawRequest(raw, "https");
+  return parsed;
+}
 
-  if (!content || !content.trim()) {
-    return <pre className="code-block finding-evidence-code">{emptyText}</pre>;
-  }
+/** 从证据响应文本解析状态码，如 "HTTP/1.1 200 OK" → 200 */
+function parseResponseStatus(raw: string): number | undefined {
+  const m = raw.match(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i);
+  return m ? parseInt(m[1], 10) : undefined;
+}
 
-  return (
-    <pre className="code-block finding-evidence-code">
-      {lines.map((lineSegs, lineIdx) => (
-        <div key={`pkt-line-${lineIdx}`}>
-          {lineSegs.map((seg, segIdx) => (
-            <span
-              key={`pkt-seg-${lineIdx}-${segIdx}`}
-              style={{ color: seg.color }}
-            >
-              {seg.text}
-            </span>
-          ))}
-        </div>
-      ))}
-    </pre>
-  );
+/** 从证据响应文本提取响应头（去掉状态行和空行） */
+function extractResponseHeaders(raw: string): string {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const splitIdx = normalized.indexOf("\n\n");
+  const headerSection = splitIdx >= 0 ? normalized.substring(0, splitIdx) : normalized;
+  const lines = headerSection.split("\n").slice(1); // 去掉状态行
+  return lines.join("\n").trim();
+}
+
+/** 从证据响应文本提取响应体（空行之后） */
+function extractResponseBody(raw: string): string {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const splitIdx = normalized.indexOf("\n\n");
+  return splitIdx >= 0 ? normalized.substring(splitIdx + 2) : "";
 }
 
 export function FindingsView() {
   const { currentProjectId } = useProject();
+  const navigate = useNavigate();
+  const { sendToRepeater, sendToIntruder, sendToAI } = usePacket();
   const [findings, setFindings] = useState<Finding[]>([]);
   const [selectedFinding, setSelectedFinding] = useState<FindingDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -100,6 +100,75 @@ export function FindingsView() {
   const [detailTab, setDetailTab] = useState<"request" | "response" | "indicator">("request");
   const [retesting, setRetesting] = useState(false);
   const [retestResult, setRetestResult] = useState<RetestResponse | null>(null);
+
+  // 右键上下文菜单
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // 解析证据请求 → 用于转发
+  const evidenceParsed = useMemo(() => {
+    const raw = selectedFinding?.evidence?.request;
+    if (!raw) return null;
+    const parsed = parseEvidenceRequest(raw);
+    if (!parsed || !parsed.url) return null;
+    return parsed;
+  }, [selectedFinding]);
+
+  // 点击外部 / 滚动时关闭右键菜单
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setContextMenu(null);
+      }
+    };
+    const handleScroll = () => setContextMenu(null);
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [contextMenu]);
+
+  const handleSendToRepeater = () => {
+    setContextMenu(null);
+    if (!evidenceParsed) return;
+    sendToRepeater({
+      method: evidenceParsed.method,
+      url: evidenceParsed.url,
+      headers: evidenceParsed.headers,
+      body: evidenceParsed.body,
+    });
+    navigate("/repeater");
+  };
+
+  const handleSendToIntruder = () => {
+    setContextMenu(null);
+    if (!evidenceParsed) return;
+    sendToIntruder({
+      method: evidenceParsed.method,
+      url: evidenceParsed.url,
+      headers: evidenceParsed.headers,
+      body: evidenceParsed.body,
+    });
+    navigate("/intruder");
+  };
+
+  const handleSendToAI = () => {
+    setContextMenu(null);
+    if (!evidenceParsed) return;
+    sendToAI({
+      method: evidenceParsed.method,
+      url: evidenceParsed.url,
+      headers: evidenceParsed.headers,
+      body: evidenceParsed.body,
+      respStatus: selectedFinding?.evidence?.response ? parseResponseStatus(selectedFinding.evidence.response) : undefined,
+      respHeaders: extractResponseHeaders(selectedFinding?.evidence?.response || ""),
+      respBody: extractResponseBody(selectedFinding?.evidence?.response || ""),
+    });
+    navigate("/agent");
+  };
 
   const refreshFindings = useCallback(async () => {
     setLoading(true);
@@ -392,7 +461,68 @@ export function FindingsView() {
 
               {/* 证据链 */}
               {selectedFinding.evidence ? (
-                <div className="flex flex-col flex-1 overflow-hidden">
+                <div
+                  className="flex flex-col flex-1 overflow-hidden"
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setContextMenu({ x: e.clientX, y: e.clientY });
+                  }}
+                >
+                  {/* 操作栏：发送到重放器 / 爆破器 / AI（与 FlowDetailPanel 保持一致） */}
+                  {evidenceParsed && (
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        padding: "4px 12px",
+                        borderBottom: "1px solid var(--border-default)",
+                        background: "var(--bg-secondary)",
+                        fontSize: 11,
+                      }}
+                    >
+                      <span
+                        className="font-mono text-xs"
+                        style={{
+                          color: "var(--text-link)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          maxWidth: 300,
+                        }}
+                        title={evidenceParsed.url}
+                      >
+                        {evidenceParsed.url}
+                      </span>
+                      <span style={{ flex: 1 }} />
+                      <button
+                        className="btn btn-sm"
+                        onClick={handleSendToRepeater}
+                        title="发送到重放器"
+                        style={{ padding: "2px 6px", fontSize: 11 }}
+                      >
+                        <Repeat size={12} /> 重放器
+                      </button>
+                      <button
+                        className="btn btn-sm"
+                        onClick={handleSendToIntruder}
+                        title="发送到爆破器"
+                        style={{ padding: "2px 6px", fontSize: 11 }}
+                      >
+                        <Swords size={12} /> 爆破器
+                      </button>
+                      <button
+                        className="btn btn-sm"
+                        onClick={handleSendToAI}
+                        title="发送到 AI 助手"
+                        style={{ padding: "2px 6px", fontSize: 11 }}
+                      >
+                        <Bot size={12} /> AI
+                      </button>
+                    </div>
+                  )}
+
                   <div className="tabs">
                     <div
                       className={`tab ${detailTab === "request" ? "active" : ""}`}
@@ -414,22 +544,24 @@ export function FindingsView() {
                     </div>
                   </div>
 
-                  <div className="scroll-container flex-1">
-                    {detailTab === "request" && (
-                      <PacketCode
-                        content={selectedFinding.evidence.request || ""}
+                  {detailTab === "request" && (
+                    <div style={{ flex: 1, overflow: "hidden", minHeight: 0, display: "flex" }}>
+                      <CodeEditor
+                        value={selectedFinding.evidence.request || ""}
                         type="request"
-                        emptyText="(无请求数据)"
                       />
-                    )}
-                    {detailTab === "response" && (
-                      <PacketCode
-                        content={selectedFinding.evidence.response || ""}
+                    </div>
+                  )}
+                  {detailTab === "response" && (
+                    <div style={{ flex: 1, overflow: "hidden", minHeight: 0, display: "flex" }}>
+                      <CodeEditor
+                        value={selectedFinding.evidence.response || ""}
                         type="response"
-                        emptyText="(无响应数据)"
                       />
-                    )}
-                    {detailTab === "indicator" && (
+                    </div>
+                  )}
+                  {detailTab === "indicator" && (
+                    <div className="scroll-container flex-1">
                       <div className="p-4">
                         <div className="text-xs text-muted mb-2">漏洞判定指标</div>
                         <div className="card text-sm">
@@ -449,8 +581,8 @@ export function FindingsView() {
                           可复现: {selectedFinding.evidence.replayable ? "是" : "否"}
                         </div>
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <EmptyState
@@ -467,6 +599,30 @@ export function FindingsView() {
           )}
         </div>
       </div>
+
+      {/* 右键上下文菜单 */}
+      {contextMenu && evidenceParsed && (
+        <div
+          ref={menuRef}
+          className="context-menu"
+          style={{
+            position: "fixed",
+            top: contextMenu.y,
+            left: contextMenu.x,
+            zIndex: 1000,
+          }}
+        >
+          <div className="context-menu-item" onClick={handleSendToRepeater}>
+            <Repeat size={13} /> 发送到重放器
+          </div>
+          <div className="context-menu-item" onClick={handleSendToIntruder}>
+            <Swords size={13} /> 发送到爆破器
+          </div>
+          <div className="context-menu-item" onClick={handleSendToAI}>
+            <Bot size={13} /> 发送到 AI 助手
+          </div>
+        </div>
+      )}
     </div>
   );
 }

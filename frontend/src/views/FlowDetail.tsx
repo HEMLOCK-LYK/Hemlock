@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Repeat, Bot, Repeat2, Swords, X } from "lucide-react";
+import { ArrowLeft, Repeat, Bot, Repeat2, Swords } from "lucide-react";
 import { getFlow, replayFlow } from "../api/flows";
 import { analyzeFlow } from "../api/ai";
 import { FLOWTAG_COLORS } from "../api/flowtag";
@@ -14,8 +14,7 @@ import {
   EmptyState,
   Spinner,
 } from "../components/Common";
-import { CodeEditor } from "../components/CodeEditor";
-import { buildRequestContent, buildResponseContent } from "../utils/flowContent";
+import { FlowDetailPanel } from "../components/FlowDetailPanel";
 
 export function FlowDetail() {
   const { flowId } = useParams<{ flowId: string }>();
@@ -28,10 +27,6 @@ export function FlowDetail() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<AnalyzeResponse | null>(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
-
-  // 右键菜单状态
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!flowId) return;
@@ -72,25 +67,7 @@ export function FlowDetail() {
     }
   };
 
-  // 点击外部 / 滚动时关闭右键菜单
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handleClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setContextMenu(null);
-      }
-    };
-    const handleScroll = () => setContextMenu(null);
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("scroll", handleScroll, true);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("scroll", handleScroll, true);
-    };
-  }, [contextMenu]);
-
   const handleSendToRepeater = () => {
-    setContextMenu(null);
     if (!flow) return;
     sendToRepeater({
       method: flow.method,
@@ -102,7 +79,6 @@ export function FlowDetail() {
   };
 
   const handleSendToIntruder = () => {
-    setContextMenu(null);
     if (!flow) return;
     sendToIntruder({
       method: flow.method,
@@ -114,7 +90,6 @@ export function FlowDetail() {
   };
 
   const handleSendToAI = () => {
-    setContextMenu(null);
     if (!flow) return;
     sendToAI({
       method: flow.method,
@@ -151,9 +126,6 @@ export function FlowDetail() {
       </div>
     );
   }
-
-  const reqContent = buildRequestContent(flow);
-  const respContent = buildResponseContent(flow);
 
   return (
     <div className="flex flex-col h-full">
@@ -234,6 +206,22 @@ export function FlowDetail() {
         </div>
         <div className="view-actions">
           <button
+            className="btn btn-sm"
+            onClick={handleSendToRepeater}
+            title="发送到重放器"
+          >
+            <Repeat2 size={12} />
+            重放器
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={handleSendToIntruder}
+            title="发送到爆破器"
+          >
+            <Swords size={12} />
+            爆破器
+          </button>
+          <button
             className={`btn btn-sm ${showAnalysis ? "btn-primary" : ""}`}
             onClick={() => setShowAnalysis((v) => !v)}
           >
@@ -251,16 +239,9 @@ export function FlowDetail() {
         </div>
       </div>
 
-      {/* 主体：AI 分析覆盖层 或 左右分栏 */}
+      {/* 主体：AI 分析覆盖层 或 复用 FlowDetailPanel（统一显示 + 转发 + 右键菜单） */}
       {showAnalysis ? (
-        <div
-          className="scroll-container"
-          style={{ padding: 12 }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setContextMenu({ x: e.clientX, y: e.clientY });
-          }}
-        >
+        <div className="scroll-container" style={{ padding: 12 }}>
           {analyzing && (
             <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 24 }}>
               <Spinner size={20} />
@@ -296,82 +277,8 @@ export function FlowDetail() {
           )}
         </div>
       ) : (
-        <div
-          style={{ flex: 1, display: "flex", overflow: "hidden", gap: 1, background: "var(--border-default)" }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setContextMenu({ x: e.clientX, y: e.clientY });
-          }}
-        >
-          {/* ===== 左侧：请求 ===== */}
-          <div
-            style={{
-              flex: "1 1 50%",
-              minWidth: 0,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              background: "var(--bg-primary)",
-            }}
-          >
-            <div style={{
-              padding: "0 12px", minHeight: 32,
-              borderBottom: "1px solid var(--border-default)", background: "var(--bg-secondary)",
-              display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-muted)",
-            }}>
-              <MethodBadge method={flow.method} />
-              <span>Request</span>
-            </div>
-            <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-              <CodeEditor value={reqContent} type="request" />
-            </div>
-          </div>
-
-          {/* ===== 右侧：响应 ===== */}
-          <div
-            style={{
-              flex: "1 1 50%",
-              minWidth: 0,
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              background: "var(--bg-primary)",
-            }}
-          >
-            <div style={{
-              padding: "0 12px", minHeight: 32,
-              borderBottom: "1px solid var(--border-default)", background: "var(--bg-secondary)",
-              display: "flex", alignItems: "center", gap: 12,
-            }}>
-              {flow.resp_status != null ? (
-                <StatusCode status={flow.resp_status} />
-              ) : (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Response</span>
-              )}
-            </div>
-            <div style={{ flex: 1, overflow: "hidden", display: "flex" }}>
-              <CodeEditor value={respContent} type="response" />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 右键上下文菜单 */}
-      {contextMenu && (
-        <div
-          ref={menuRef}
-          className="context-menu"
-          style={{ position: "fixed", top: contextMenu.y, left: contextMenu.x, zIndex: 1000 }}
-        >
-          <div className="context-menu-item" onClick={handleSendToRepeater}>
-            <Repeat2 size={13} /> 发送到重放器
-          </div>
-          <div className="context-menu-item" onClick={handleSendToIntruder}>
-            <Swords size={13} /> 发送到爆破器
-          </div>
-          <div className="context-menu-item" onClick={handleSendToAI}>
-            <Bot size={13} /> 发送到 AI 助手
-          </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          <FlowDetailPanel flow={flow} storageKeyPrefix="flowdetail" />
         </div>
       )}
     </div>
