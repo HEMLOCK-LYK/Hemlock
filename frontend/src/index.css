@@ -1637,10 +1637,15 @@ textarea {
   grid-template-rows: auto 1fr;
 }
 .agent-chat-thinking.thinking-done {
-  opacity: 0.7;
+  opacity: 0.6;
   transition: opacity 0.2s ease, grid-template-rows 0.25s var(--ease-out-quart);
 }
 .agent-chat-thinking.thinking-done:hover { opacity: 1; }
+/* 折叠后的已完成思考块更紧凑：缩小头部高度，让一屏能容纳更多内容 */
+.agent-chat-thinking.thinking-done .agent-chat-thinking-header {
+  padding: 3px 12px;
+  min-height: 24px;
+}
 
 /* 头部：可点击按钮 */
 .agent-chat-thinking-header {
@@ -1850,6 +1855,129 @@ textarea {
   color: var(--text-muted);
   text-align: right;
   border-top: 1px solid var(--border-subtle);
+}
+
+/* ===== 子 Agent 卡片（spawn_subagent 嵌套展示） ===== */
+.agent-chat-subagent {
+  align-self: stretch;
+  margin-left: 8px;
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--accent-green);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+.agent-chat-subagent-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  transition: background 0.12s;
+}
+.agent-chat-subagent-header:hover {
+  background: var(--bg-hover);
+}
+.agent-chat-subagent-icon {
+  color: var(--accent-green);
+  flex-shrink: 0;
+}
+.agent-chat-subagent-role {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.agent-chat-subagent-tag {
+  font-size: 10px;
+  color: var(--accent-green);
+  border: 1px solid var(--accent-green);
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 14px;
+  flex-shrink: 0;
+}
+.agent-chat-subagent-goal {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-chat-subagent-status {
+  color: var(--text-muted);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.agent-chat-subagent-chevron {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.agent-chat-subagent-body {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-chat-subagent-goal-full {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.agent-chat-subagent-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.agent-chat-subagent-tool {
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--accent-purple);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+.agent-chat-subagent-tool-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: 11px;
+  user-select: none;
+}
+.agent-chat-subagent-tool-header:hover {
+  background: var(--bg-hover);
+}
+.agent-chat-subagent-tool-body {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border-subtle);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.agent-chat-subagent-summary {
+  border-top: 1px dashed var(--border-default);
+  padding-top: 6px;
+}
+.agent-chat-subagent-summary-text {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+.agent-chat-subagent-connecting {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+/* 子 Agent 卡片内的思考链块：卡片内全宽、紧凑间距（复用 thinking 折叠样式） */
+.agent-chat-subagent .agent-chat-thinking {
+  width: 100%;
+  max-width: 100%;
+  margin: 6px 0 2px 0;
+  background: var(--bg-base);
 }
 
 /* ===== Agent Config (Skills & MCP) ===== */

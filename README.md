@@ -9,7 +9,7 @@
 
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.1-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-green.svg)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey.svg)](#)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Contact](https://img.shields.io/badge/Contact-1878093812%40qq.com-blue)](mailto:1878093812@qq.com)
@@ -64,7 +64,7 @@ Agent 跑起来，你只需要看着它干活、在关键节点点头放行、�
 - 敏感操作（**DoS / 注入 / RCE / 数据删除**）强制人工确认，300s 超时自动拒绝
 - 明确区分"Agent 能碰什么、必须你点头才碰什么"
 
-### 6. 渐进式技能披露（98 个内置安全技能）
+### 6. 渐进式技能披露（99 个内置安全技能）
 - system prompt 只注入技能名称 + 简短描述，完整指令按需加载
 - 技能库覆盖：Web 漏洞（SQLi/XSS/SSRF/SSTI/反序列化…）、系统渗透（提权/横向/域渗透）、密码学、云原生、移动安全等
 

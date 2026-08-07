@@ -42,6 +42,10 @@ _RETRYABLE_ERRORS = (
     InternalServerError,
 )
 
+class _StopStream(Exception):
+    """内部信号：流式请求被用户主动停止（用于重试包装器中提前退出）。"""
+
+
 # Token 用量统计（进程级）
 _token_usage: dict[str, int] = {
     "prompt_tokens": 0,
@@ -369,6 +373,7 @@ def chat_with_retry(
     model: str | None = None,
     provider_id: str | None = None,
     db: "Session | None" = None,
+    should_stop: "Callable[[], bool] | None" = None,
 ) -> dict[str, Any] | None:
     """带额外重试的 chat，用于 Agent 主循环中 LLM 返回异常内容时的恢复。
 
@@ -377,8 +382,13 @@ def chat_with_retry(
     参数 model 可指定使用的模型，为 None 时使用 settings.llm_model。
     参数 provider_id 可指定使用的 Provider ID，不为 None 时使用该 Provider 的客户端。
     参数 db 为数据库会话，传入时可从数据库查询 Provider 配置。
+    参数 should_stop: 每次请求前（含重试间隔）轮询的停止回调。返回 True 时
+        立即放弃本次调用并返回 None，用于用户点停止时不再发起新的 LLM 请求。
     """
     for attempt in range(max_retries + 1):
+        if should_stop is not None and should_stop():
+            logger.info("chat_with_retry 已停止（should_stop）")
+            return None
         try:
             result = chat(
                 messages,
@@ -422,6 +432,7 @@ def chat_stream(
     db: "Session | None" = None,
     on_reasoning: "Callable[[str], None] | None" = None,
     on_content: "Callable[[str], None] | None" = None,
+    should_stop: "Callable[[], bool] | None" = None,
 ) -> dict[str, Any]:
     """流式调用 LLM 对话，支持实时回调推理内容和最终回复。
 
@@ -434,10 +445,17 @@ def chat_stream(
     Args:
         on_reasoning: 收到 reasoning_content 增量时调用
         on_content: 收到 content 增量时调用
+        should_stop: 逐 chunk 检查的停止回调。返回 True 时立即中断流式读取
+            （用于用户点停止时立刻终止 LLM 思考，不再等生成完毕）。
+            在同步线程中被轮询，需保证线程安全（读布尔标志即可）。
 
     Returns:
         {"content": str, "tool_calls": list[dict] | None, "reasoning_content": str}
     """
+    # 发起请求前已请求停止：直接返回空结果（不发起无意义的调用）
+    if should_stop is not None and should_stop():
+        return {"content": "", "tool_calls": None, "reasoning_content": ""}
+
     client, use_model = _resolve_client_and_model(provider_id, db, model)
     messages = _apply_cache_control(messages, use_model)
     kwargs: dict[str, Any] = {
@@ -451,15 +469,24 @@ def chat_stream(
         kwargs["tool_choice"] = "auto"
 
     def _call():
+        # 重试间隔内也可能被停止，避免停止后还发起请求
+        if should_stop is not None and should_stop():
+            raise _StopStream()
         return client.chat.completions.create(**kwargs)
 
-    resp = _retry_api_call(_call, "chat_stream")
+    try:
+        resp = _retry_api_call(_call, "chat_stream")
+    except _StopStream:
+        return {"content": "", "tool_calls": None, "reasoning_content": ""}
 
     full_reasoning = ""
     full_content = ""
     tool_calls_raw: list[Any] = []
 
     for chunk in resp:
+        # 用户停止：立即中断流式读取（下一个 chunk 边界，通常在百毫秒内）
+        if should_stop is not None and should_stop():
+            break
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
@@ -521,13 +548,19 @@ def chat_stream_with_retry(
     db: "Session | None" = None,
     on_reasoning: "Callable[[str], None] | None" = None,
     on_content: "Callable[[str], None] | None" = None,
+    should_stop: "Callable[[], bool] | None" = None,
 ) -> dict[str, Any] | None:
     """带额外重试的 chat_stream，用于 Agent 主循环。
 
     与 chat_stream() 不同：如果 LLM 返回空内容且无 tool_calls，会重试。
     返回 None 表示重试耗尽仍无法获得有效响应。
+
+    should_stop: 逐 chunk 检查的停止回调，用户点停止后立即中断。
     """
     for attempt in range(max_retries + 1):
+        # 已停止则不再发起下一次重试
+        if should_stop is not None and should_stop():
+            return None
         try:
             # 只在第一次尝试时推送 reasoning 增量，避免重试导致重复推送思考链
             # 重试时 on_reasoning=None，reasoning_content 仍会累积在返回值中
@@ -542,6 +575,7 @@ def chat_stream_with_retry(
                 db=db,
                 on_reasoning=attempt_on_reasoning,
                 on_content=on_content,
+                should_stop=should_stop,
             )
             content = result.get("content", "")
             tool_calls = result.get("tool_calls")

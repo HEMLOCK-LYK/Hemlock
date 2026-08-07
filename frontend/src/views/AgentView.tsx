@@ -65,9 +65,10 @@ const STATUS_COLORS: Record<string, string> = {
 
 interface ParsedMessage {
   id: string;
-  role: "user" | "assistant" | "system" | "tool_call" | "thinking";
+  role: "user" | "assistant" | "system" | "tool_call" | "thinking" | "subagent";
   content: string;
   tool?: { tool: string; args: unknown; result: unknown };
+  subagent?: SubagentInfo;
   timestamp: string;
   streaming?: boolean; // 标记是否正在流式输出
 }
@@ -76,6 +77,25 @@ interface ToolInfo {
   tool: string;
   args: unknown;
   result: unknown;
+}
+
+interface SubagentToolCall {
+  tool: string;
+  args: unknown;
+  result: unknown;
+  step: number;
+}
+
+interface SubagentInfo {
+  role: string;
+  roleDisplay: string;
+  goal: string;
+  toolCalls: SubagentToolCall[];
+  summary: string;
+  newFindingsCount: number;
+  running: boolean;
+  /** 子 Agent 的思考链（subagent_thinking 步骤，刷新后重建展示） */
+  thinking?: string[];
 }
 
 // ===== 工具函数 =====
@@ -123,12 +143,63 @@ function parseStepData(data: unknown): {
   return { text: String(data ?? "") };
 }
 
+/** 解析 step.data 为原始字典（子 Agent 步骤需完整字段，parseStepData 只提取 tool/args/result） */
+function parseStepRaw(data: unknown): Record<string, unknown> {
+  if (typeof data === "string") {
+    try {
+      const parsed = JSON.parse(data);
+      if (parsed && typeof parsed === "object") {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // 非 JSON 字符串
+    }
+    return {};
+  }
+  if (data && typeof data === "object") {
+    return data as Record<string, unknown>;
+  }
+  return {};
+}
+
 /** 将 task.steps 转换为可渲染的消息列表 */
 function stepsToMessages(steps: StepData[]): ParsedMessage[] {
-  return steps.map((step, i) => {
+  const result: ParsedMessage[] = [];
+  let i = 0;
+  const n = steps.length;
+  while (i < n) {
+    const step = steps[i];
+    const stepIndex = i;
+
+    // spawn_subagent 工具调用：映射为子 Agent 卡片（展示角色/目标/摘要）
     if (step.type === "tool_call") {
       const d = parseStepData(step.data);
-      return {
+      if (d.tool === "spawn_subagent" && d.result) {
+        const res = (d.result as Record<string, unknown>) || {};
+        const role = String(res.role ?? "");
+        result.push({
+          id: `step-${i}`,
+          role: "subagent",
+          content: "",
+          subagent: {
+            role,
+            roleDisplay: String(res.role_display ?? (role || "子 Agent")),
+            goal:
+              d.args && typeof d.args === "object"
+                ? String((d.args as Record<string, unknown>).goal ?? "")
+                : "",
+            toolCalls: [],
+            summary: String(res.summary ?? ""),
+            newFindingsCount: 0,
+            running: false,
+            thinking: [],
+          },
+          timestamp: step.timestamp,
+        });
+        i += 1;
+        continue;
+      }
+      result.push({
         id: `step-${i}`,
         role: "tool_call",
         content: "",
@@ -138,18 +209,99 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
           result: d.result ?? null,
         },
         timestamp: step.timestamp,
-      };
+      });
+      i += 1;
+      continue;
     }
 
-    // thinking 类型：中间思考过程，默认折叠，点击可展开
-    if (step.type === "thinking") {
-      const d = parseStepData(step.data);
-      return {
-        id: `step-${i}`,
-        role: "thinking",
-        content: d.text ?? "",
+    // subagent_started：持久化的子 Agent 内部步骤 → 重建嵌套卡片（刷新后不丢工具调用细节）
+    if (step.type === "subagent_started") {
+      const d = parseStepRaw(step.data);
+      const role = String(d.role ?? "");
+      const toolCalls: SubagentToolCall[] = [];
+      let summary = "";
+      let newFindingsCount = 0;
+      let running = true;
+      const thinking: string[] = [];
+      i += 1;
+
+      // 消费后续 subagent_thinking / subagent_tool_call / subagent_tool_result /
+      // subagent_complete，以及尾部 spawn_subagent 记录（合并摘要，避免重复卡片）
+      while (i < n) {
+        const st = steps[i].type;
+        if (st === "subagent_thinking") {
+          const sd = parseStepRaw(steps[i].data);
+          const t = String(sd.content ?? "").trim();
+          if (t) thinking.push(t);
+        } else if (st === "subagent_tool_call") {
+          const sd = parseStepRaw(steps[i].data);
+          toolCalls.push({
+            tool: String(sd.tool ?? "unknown"),
+            args: sd.args ?? null,
+            result: null,
+            step: Number(sd.step ?? 0),
+          });
+        } else if (st === "subagent_tool_result") {
+          const sd = parseStepRaw(steps[i].data);
+          const s = Number(sd.step ?? 0);
+          const target = toolCalls.find((t) => t.step === s);
+          if (target) target.result = sd.result ?? null;
+        } else if (st === "subagent_complete") {
+          const sd = parseStepRaw(steps[i].data);
+          summary = String(sd.summary ?? "");
+          newFindingsCount = Number(sd.new_findings_count ?? 0);
+          running = false;
+        } else if (st === "tool_call") {
+          // 尾部 spawn_subagent 记录（run_subagent 返回后由 chat_with_agent 追加）
+          const sd = parseStepRaw(steps[i].data);
+          if (sd.tool === "spawn_subagent" && !summary) {
+            const res = (sd.result as Record<string, unknown>) || {};
+            summary = String(res.summary ?? "");
+          }
+        } else {
+          break;
+        }
+        i += 1;
+      }
+
+      result.push({
+        id: `step-${stepIndex}`,
+        role: "subagent",
+        content: "",
+        subagent: {
+          role,
+          roleDisplay: String(d.role_display ?? (role || "子 Agent")),
+          goal: String(d.goal ?? ""),
+          toolCalls,
+          summary,
+          newFindingsCount,
+          running,
+          thinking,
+        },
         timestamp: step.timestamp,
-      };
+      });
+      continue;
+    }
+
+    // thinking 类型：合并连续 thinking 步骤为一块（Trae 风格：一段思考一个折叠块，
+    // 避免"一堆思维链条折叠摆着"的堆叠感）
+    if (step.type === "thinking") {
+      let combined = "";
+      while (i < n && steps[i].type === "thinking") {
+        const d = parseStepData(steps[i].data);
+        const text = d.text ?? "";
+        if (text) combined += (combined ? "\n\n" : "") + text;
+        i += 1;
+      }
+      if (combined) {
+        result.push({
+          id: `step-${stepIndex}`,
+          role: "thinking",
+          content: combined,
+          timestamp: step.timestamp,
+        });
+      }
+      continue;
     }
 
     let role: ParsedMessage["role"] = "system";
@@ -168,13 +320,15 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
     }
 
     const d = parseStepData(step.data);
-    return {
+    result.push({
       id: `step-${i}`,
       role,
       content: d.text ?? "",
       timestamp: step.timestamp,
-    };
-  });
+    });
+    i += 1;
+  }
+  return result;
 }
 
 /** 格式化字节数 */
@@ -317,9 +471,6 @@ export function AgentView() {
   const isMountedRef = useRef(true);
   // runningTasks 的 ref 镜像，供 WebSocket 回调读取最新值
   const runningTasksRef = useRef<Set<string>>(new Set());
-  // 运行中收到的消息队列（对齐 Claude Code：不打断当前轮，执行完再读）
-  const pendingQueueRef = useRef<{ taskId: string; message: string }[]>([]);
-  const [queuedCount, setQueuedCount] = useState(0);
   // rAF 批量更新：思维链 delta 累积缓冲区（taskId -> 累积的 delta 字符串）
   const thinkingDeltaBufferRef = useRef<Map<string, string>>(new Map());
   // 定时器 ID，null 表示未调度
@@ -562,7 +713,16 @@ export function AgentView() {
         .filter((m) => m.role === "tool_call" && m.tool)
         .map((m) => `${m.tool!.tool}:${JSON.stringify(m.tool!.args)}`)
     );
+    const _baseSubagentRoles = new Set(
+      baseMessages
+        .filter((m) => m.role === "subagent" && m.subagent)
+        .map((m) => m.subagent!.role)
+    );
     const _filteredOptimistic = currentOptimistic.filter((m) => {
+      if (m.role === "subagent" && m.subagent) {
+        // 子 Agent 已持久化到 steps（同名角色）时，过滤乐观副本避免重复
+        return !_baseSubagentRoles.has(m.subagent.role);
+      }
       if (m.role === "thinking" && m.content) {
         const prefix = m.content.slice(0, 100);
         return !_baseThinkingPrefixes.has(prefix);
@@ -810,6 +970,111 @@ export function AgentView() {
           return;
         }
 
+        // ===== 子 Agent 事件（chat 模式 spawn_subagent 实时流）：构建嵌套卡片 =====
+        if (event.event === "subagent_started") {
+          const role = (event.role as string) || "subagent";
+          setOptimisticByTask((prev) => ({
+            ...prev,
+            [taskId]: [
+              ...(prev[taskId] ?? []),
+              {
+                id: `ws-subagent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                role: "subagent" as const,
+                content: "",
+                subagent: {
+                  role,
+                  roleDisplay: (event.role_display as string) || role,
+                  goal: (event.goal as string) || "",
+                  toolCalls: [],
+                  summary: "",
+                  newFindingsCount: 0,
+                  running: true,
+                  thinking: [],
+                },
+                timestamp: now,
+              },
+            ],
+          }));
+          return;
+        }
+
+        if (event.event === "subagent_tool_call") {
+          const role = (event.role as string) || "";
+          const toolName = (event.tool as string) || "unknown";
+          const step = (event.step as number) || 0;
+          setOptimisticByTask((prev) => {
+            const msgs = prev[taskId] ?? [];
+            // 从后往前找 running 中同 role 的子 Agent 消息
+            const idx = [...msgs].reverse().findIndex(
+              (m) => m.role === "subagent" && m.subagent?.role === role && m.subagent.running
+            );
+            if (idx === -1) return prev;
+            const realIdx = msgs.length - 1 - idx;
+            const updated = [...msgs];
+            const sub = updated[realIdx].subagent!;
+            updated[realIdx] = {
+              ...updated[realIdx],
+              subagent: {
+                ...sub,
+                toolCalls: [
+                  ...sub.toolCalls,
+                  { tool: toolName, args: event.args, result: null, step },
+                ],
+              },
+            };
+            return { ...prev, [taskId]: updated };
+          });
+          return;
+        }
+
+        if (event.event === "subagent_tool_result") {
+          const role = (event.role as string) || "";
+          const step = (event.step as number) || 0;
+          setOptimisticByTask((prev) => {
+            const msgs = prev[taskId] ?? [];
+            const idx = [...msgs].reverse().findIndex(
+              (m) => m.role === "subagent" && m.subagent?.role === role && m.subagent.running
+            );
+            if (idx === -1) return prev;
+            const realIdx = msgs.length - 1 - idx;
+            const updated = [...msgs];
+            const sub = updated[realIdx].subagent!;
+            const newCalls = sub.toolCalls.map((t) =>
+              t.step === step ? { ...t, result: event.result } : t
+            );
+            updated[realIdx] = {
+              ...updated[realIdx],
+              subagent: { ...sub, toolCalls: newCalls },
+            };
+            return { ...prev, [taskId]: updated };
+          });
+          return;
+        }
+
+        if (event.event === "subagent_complete") {
+          const role = (event.role as string) || "";
+          setOptimisticByTask((prev) => {
+            const msgs = prev[taskId] ?? [];
+            const idx = [...msgs].reverse().findIndex(
+              (m) => m.role === "subagent" && m.subagent?.role === role && m.subagent.running
+            );
+            if (idx === -1) return prev;
+            const realIdx = msgs.length - 1 - idx;
+            const updated = [...msgs];
+            updated[realIdx] = {
+              ...updated[realIdx],
+              subagent: {
+                ...updated[realIdx].subagent!,
+                summary: (event.summary as string) || "",
+                newFindingsCount: (event.new_findings_count as number) || 0,
+                running: false,
+              },
+            };
+            return { ...prev, [taskId]: updated };
+          });
+          return;
+        }
+
         // 其他事件（chat_message 等）：刷新详情同步
         refreshTaskDetail(taskId);
       }
@@ -896,9 +1161,6 @@ export function AgentView() {
   const handleSelectTask = (taskId: string) => {
     if (selectedTaskId.current === taskId) return;
     selectedTaskId.current = taskId;
-    // 切换任务时清空消息队列（排队的消息属于上一个任务）
-    pendingQueueRef.current = [];
-    setQueuedCount(0);
     // 先清空当前任务 + 显示加载动画，让旧消息卸载，避免新旧消息同时渲染导致卡顿
     setSelectedTask(null);
     setTaskLoading(true);
@@ -978,26 +1240,15 @@ export function AgentView() {
   };
 
   // 发送消息（多任务并行：按任务隔离乐观消息和运行状态）
-  const handleSend = async (queuedMessage?: string) => {
-    // 有排队消息时直接用；否则读输入框 + 数据包预览
-    let message = queuedMessage ?? input.trim();
-    if (pendingPreview && !queuedMessage) {
+  const handleSend = async () => {
+    // 读输入框 + 数据包预览
+    let message = input.trim();
+    if (pendingPreview) {
       message = message ? `${message}\n\n${pendingPreview}` : pendingPreview;
     }
     if (!message) return;
     if (!selectedTask) return;
     const taskId = selectedTask.id;
-
-    // Agent 运行中收到新消息：不打断当前轮，进队列，当前轮结束后自动发送（对齐 Claude Code）
-    // 只对"用户主动发送"排队；队列排空发来的消息直接发送
-    if (!queuedMessage && runningTasksRef.current.has(taskId)) {
-      pendingQueueRef.current.push({ taskId, message });
-      setQueuedCount(pendingQueueRef.current.length);
-      setInput("");
-      setPendingPreview(null);
-      return;
-    }
-
     const now = new Date().toISOString();
 
     // 清除预览
@@ -1015,6 +1266,20 @@ export function AgentView() {
       ...prev,
       [taskId]: [...(prev[taskId] ?? []), userMsg],
     }));
+
+    // Agent 运行中收到新消息：非阻塞注入，下一思考边界即被识别（对齐 Claude Code 补充消息）
+    // 不打断当前 LLM 思考/工具执行，避免浪费 Token；乐观消息由 WS chat_message 去重
+    const alreadyRunning = runningTasksRef.current.has(taskId);
+    if (alreadyRunning) {
+      try {
+        const r = await agentChatApi.inject(taskId, message);
+        if (r.queued) return;
+        // 后端无活跃循环（任务刚结束）：回退为正常的阻塞式对话发送
+      } catch {
+        // 注入失败（网络等）：回退为正常的阻塞式对话发送
+      }
+    }
+
     // 标记当前任务为运行中
     setRunningTasks((prev) => new Set(prev).add(taskId));
 
@@ -1111,13 +1376,6 @@ export function AgentView() {
         });
       }
       abortControllersRef.current.delete(taskId);
-      // 当前轮结束：自动发送队列中积压的消息（对齐 Claude Code 排队机制）
-      if (pendingQueueRef.current.length > 0) {
-        const next = pendingQueueRef.current.shift()!;
-        setQueuedCount(pendingQueueRef.current.length);
-        // 延迟一点，等 running 状态 ref 同步完成、UI 稳定后再发下一条
-        window.setTimeout(() => handleSend(next.message), 200);
-      }
     }
   };
 
@@ -1130,18 +1388,32 @@ export function AgentView() {
     if (controller) {
       controller.abort();
     }
-    // 2. 通知后端取消任务
+    // 2. 通知后端取消任务（cancel 会清空 inbox、终止流式请求）
     try {
       await agentApi.cancelTask(taskId);
     } catch {
       // 后端可能已经完成，忽略错误
     }
-    // 3. 清理运行状态
+    // 3. 清理运行状态（state + ref 同步，避免注入判断读到陈旧值）
     setRunningTasks((prev) => {
       const n = new Set(prev);
       n.delete(taskId);
       return n;
     });
+    runningTasksRef.current = new Set(
+      [...runningTasksRef.current].filter((id) => id !== taskId)
+    );
+    // 4. 清理未落库的乐观消息（乐观用户消息 / 半途工具调用等），刷新详情对齐真实状态
+    setOptimisticByTask((prev) => {
+      const n = { ...prev };
+      delete n[taskId];
+      return n;
+    });
+    try {
+      await refreshTaskDetail(taskId);
+    } catch {
+      // 详情刷新失败可忽略
+    }
   };
 
   // 输入框快捷键：Enter 发送，Shift+Enter / Ctrl+Enter 换行
@@ -1719,12 +1991,6 @@ export function AgentView() {
 
               {/* 输入区域 */}
               <div className="agent-chat-input-area">
-                {/* 运行中消息已排队提示（对齐 Claude Code：不打断，当前轮完成后自动发送） */}
-                {queuedCount > 0 && (
-                  <div style={{ fontSize: 11, color: "var(--accent-yellow)", padding: "2px 2px 6px" }}>
-                    {queuedCount} 条消息已排队，当前任务完成后自动发送…
-                  </div>
-                )}
                 {/* 待发送数据包预览（可折叠） */}
                 {pendingPreview && (
                   <PendingPacketPreview
@@ -1989,6 +2255,11 @@ const MessageRenderer = memo(function MessageRenderer({ message, onFlowClick }: 
     return <ThinkingMessage content={message.content} streaming={message.streaming} id={message.id} />;
   }
 
+  // 子 Agent 卡片（spawn_subagent 嵌套展示）
+  if (message.role === "subagent" && message.subagent) {
+    return <SubagentCard subagent={message.subagent} timestamp={message.timestamp} />;
+  }
+
   // 用户消息（头像在右，气泡在左，尖角指向右侧头像）— QQ 风格
   if (message.role === "user") {
     return (
@@ -2084,7 +2355,7 @@ const ThinkingMessage = memo(function ThinkingMessage({ content, streaming, id }
       <div className="agent-chat-thinking-header" onClick={handleToggle}>
         <Brain size={11} className="agent-chat-thinking-icon" />
         <span className={`agent-chat-thinking-label ${streaming ? "thinking-label-active" : "thinking-label-done"}`}>
-          {streaming ? "思考中…" : "思考过程"}
+          {streaming ? "思考中…" : `思考过程 · ${content.trim().length} 字`}
         </span>
         {streaming && <span className="thinking-cursor" />}
         <ChevronRight size={10} className="agent-chat-thinking-chevron" />
@@ -2154,14 +2425,13 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
       : "";
 
   const preview = isRunning ? "执行中…" : summarizeResult(tool.result);
-  const hasDetail = Boolean(argsText || resultText);
 
   return (
     <div className="agent-chat-toolcard">
       <div
         className="agent-chat-toolcard-header"
-        onClick={() => hasDetail && setExpanded((v) => !v)}
-        style={{ cursor: hasDetail ? "pointer" : "default" }}
+        onClick={() => setExpanded((v) => !v)}
+        style={{ cursor: "pointer" }}
       >
         <Wrench size={12} className="agent-chat-toolcard-icon" />
         <span className="agent-chat-toolcard-name">{tool.tool}</span>
@@ -2171,15 +2441,14 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
             {preview}
           </span>
         )}
-        {hasDetail &&
-          (expanded ? (
-            <ChevronDown size={12} className="agent-chat-toolcard-chevron" />
-          ) : (
-            <ChevronRight size={12} className="agent-chat-toolcard-chevron" />
-          ))}
+        {expanded ? (
+          <ChevronDown size={12} className="agent-chat-toolcard-chevron" />
+        ) : (
+          <ChevronRight size={12} className="agent-chat-toolcard-chevron" />
+        )}
       </div>
 
-      {expanded && hasDetail && (
+      {expanded && (
         <div className="agent-chat-toolcard-body">
           {argsText && (
             <div className="agent-chat-toolcard-section">
@@ -2197,6 +2466,171 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
                 {renderResultWithLinks(resultText, onFlowClick)}
               </pre>
             </div>
+          )}
+        </div>
+      )}
+
+      <div className="agent-chat-toolcard-time">
+        {timestamp ? new Date(timestamp).toLocaleTimeString("zh-CN") : ""}
+      </div>
+    </div>
+  );
+});
+
+// ===== 子组件：子 Agent 卡片（spawn_subagent 嵌套展示，Codex/Claude Code 风格） =====
+
+interface SubagentToolRowProps {
+  call: SubagentToolCall;
+}
+
+const SubagentToolRow = memo(function SubagentToolRow({ call }: SubagentToolRowProps) {
+  const [expanded, setExpanded] = useState(false);
+  const argsText = call.args != null ? JSON.stringify(call.args, null, 2) : "";
+  const isRunning = call.result === null;
+  const resultText =
+    call.result != null
+      ? typeof call.result === "string"
+        ? call.result
+        : JSON.stringify(call.result, null, 2)
+      : "";
+  const preview = isRunning ? "执行中…" : summarizeResult(call.result);
+
+  return (
+    <div className="agent-chat-subagent-tool">
+      <div
+        className="agent-chat-subagent-tool-header"
+        onClick={() => setExpanded((v) => !v)}
+        style={{ cursor: "pointer" }}
+      >
+        <Wrench size={10} className="agent-chat-toolcard-icon" />
+        <span className="agent-chat-toolcard-name">{call.tool}</span>
+        {!expanded && preview && (
+          <span
+            className="agent-chat-toolcard-preview"
+            style={isRunning ? { color: "var(--accent-yellow)" } : undefined}
+          >
+            {isRunning && <RefreshCw size={9} className="spin" style={{ display: "inline", marginRight: 4 }} />}
+            {preview}
+          </span>
+        )}
+        {expanded ? (
+          <ChevronDown size={10} className="agent-chat-toolcard-chevron" />
+        ) : (
+          <ChevronRight size={10} className="agent-chat-toolcard-chevron" />
+        )}
+      </div>
+      {expanded && (argsText || resultText) && (
+        <div className="agent-chat-subagent-tool-body">
+          {argsText && (
+            <div className="agent-chat-toolcard-section">
+              <div className="agent-chat-toolcard-label">参数</div>
+              <pre className="agent-chat-toolcard-pre">{argsText}</pre>
+            </div>
+          )}
+          {resultText && (
+            <div className="agent-chat-toolcard-section">
+              <div className="agent-chat-toolcard-label">
+                <CheckCircle2 size={11} />
+                结果
+              </div>
+              <pre className="agent-chat-toolcard-pre">{resultText}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
+interface SubagentThinkingProps {
+  thoughts: string[];
+}
+
+/** 子 Agent 思考链折叠块（subagent_thinking 步骤重建，复用 thinking 样式） */
+const SubagentThinking = memo(function SubagentThinking({ thoughts }: SubagentThinkingProps) {
+  const [expanded, setExpanded] = useState(false);
+  const combined = thoughts.join("\n\n");
+  return (
+    <div
+      className={`agent-chat-thinking thinking-done subagent-thinking ${expanded ? "expanded" : ""}`}
+    >
+      <div className="agent-chat-thinking-header" onClick={() => setExpanded((v) => !v)}>
+        <Brain size={11} className="agent-chat-thinking-icon" />
+        <span className="agent-chat-thinking-label thinking-label-done">
+          思考过程 · {combined.trim().length} 字
+        </span>
+        <ChevronRight size={10} className="agent-chat-thinking-chevron" />
+      </div>
+      <div className="agent-chat-thinking-content">
+        <div className="agent-chat-thinking-content-inner">
+          <div className="thinking-stream-text">{combined}</div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+interface SubagentCardProps {
+  subagent: SubagentInfo;
+  timestamp: string;
+}
+
+const SubagentCard = memo(function SubagentCard({ subagent, timestamp }: SubagentCardProps) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className={`agent-chat-subagent ${subagent.running ? "" : "subagent-done"}`}>
+      <div className="agent-chat-subagent-header" onClick={() => setExpanded((v) => !v)}>
+        <Users size={12} className="agent-chat-subagent-icon" />
+        <span className="agent-chat-subagent-role">{subagent.roleDisplay || subagent.role}</span>
+        <span className="agent-chat-subagent-tag">子任务</span>
+        {!expanded && subagent.goal && (
+          <span className="agent-chat-subagent-goal">{subagent.goal}</span>
+        )}
+        <span className="agent-chat-subagent-status">
+          {subagent.running ? (
+            <>
+              <RefreshCw size={10} className="spin" style={{ display: "inline", marginRight: 4 }} />
+              执行中…
+            </>
+          ) : (
+            <>
+              <CheckCircle2 size={10} style={{ display: "inline", marginRight: 4 }} />
+              已完成
+              {subagent.newFindingsCount > 0 && ` · 新增 ${subagent.newFindingsCount} 个发现`}
+            </>
+          )}
+        </span>
+        {expanded ? (
+          <ChevronDown size={11} className="agent-chat-subagent-chevron" />
+        ) : (
+          <ChevronRight size={11} className="agent-chat-subagent-chevron" />
+        )}
+      </div>
+
+      {expanded && (
+        <div className="agent-chat-subagent-body">
+          {subagent.goal && (
+            <div className="agent-chat-subagent-goal-full">目标：{subagent.goal}</div>
+          )}
+          {(subagent.thinking?.length ?? 0) > 0 && (
+            <SubagentThinking thoughts={subagent.thinking ?? []} />
+          )}
+          {subagent.toolCalls.length > 0 && (
+            <div className="agent-chat-subagent-tools">
+              {subagent.toolCalls.map((tc, i) => (
+                <SubagentToolRow key={i} call={tc} />
+              ))}
+            </div>
+          )}
+          {subagent.summary && (
+            <div className="agent-chat-subagent-summary">
+              <div className="agent-chat-toolcard-label">执行摘要</div>
+              <div className="agent-chat-subagent-summary-text">{subagent.summary}</div>
+            </div>
+          )}
+          {subagent.running && subagent.toolCalls.length === 0 && (
+            <div className="agent-chat-subagent-connecting">子 Agent 正在启动…</div>
           )}
         </div>
       )}

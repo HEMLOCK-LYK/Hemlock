@@ -1152,7 +1152,7 @@ export function Settings() {
               <span className="text-muted" style={{ minWidth: 64 }}>
                 版本
               </span>
-              <span>Hemlock v0.3.1</span>
+              <span>Hemlock v0.4.0</span>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <span className="text-muted" style={{ minWidth: 64 }}>

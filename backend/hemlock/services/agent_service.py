@@ -44,7 +44,7 @@ import logging
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from sqlalchemy.orm import Session
@@ -1124,15 +1124,18 @@ AGENT_TOOLS = [
     },
 ]
 
-# 指挥官专用工具：启动子 Agent（仅多 Agent 协作模式可用）
+# 子 Agent 工具：启动专职子 Agent 分工（主 Agent 与指挥官均可用，子 Agent 自身禁用防止递归）
 SPAWN_SUBAGENT_TOOL = {
     "type": "function",
     "function": {
         "name": "spawn_subagent",
         "description": (
-            "启动一个子 Agent 执行特定角色的任务。仅指挥官（Coordinator）可用。"
-            "调用后子 Agent 会自主运行，完成后返回执行摘要。"
-            "子 Agent 共享当前测试上下文（PentestContext），其发现会自动记录。"
+            "启动一个子 Agent 执行特定角色的分工任务。"
+            "适合把独立、聚焦、多步骤的活儿委托出去：如让 scout 做一次完整的攻击面收集、"
+            "让 radar 做技术栈识别与 CVE 关联、让 auditor 复核一批可疑结果、"
+            "让 scribe 汇总生成本阶段报告。子 Agent 使用角色专属提示词与独立上下文运行，"
+            "共享当前测试上下文（PentestContext），发现会自动记录，完成后返回执行摘要。"
+            "不要把所有工作都交给子 Agent——简单、单步的操作直接自己做更高效。"
         ),
         "parameters": {
             "type": "object",
@@ -1140,20 +1143,20 @@ SPAWN_SUBAGENT_TOOL = {
                 "role": {
                     "type": "string",
                     "description": (
-                        "角色名称，可选值："
-                        "scout(侦察员:信息收集/端点发现)、"
+                        "（可选）专业角色名称：scout(侦察员:信息收集/端点发现)、"
                         "striker(攻击手:漏洞测试/Payload执行)、"
                         "auditor(验证员:漏洞复核/误报排除)、"
                         "radar(情报员:技术栈识别/CVE关联)、"
-                        "scribe(报告员:报告生成/发现汇总)"
+                        "scribe(报告员:报告生成/发现汇总)。"
+                        "不填或任务与角色不完全匹配时，子 Agent 作为通用执行单元按任务目标直接执行"
                     ),
                 },
                 "goal": {
                     "type": "string",
-                    "description": "子 Agent 的具体任务目标，应清晰描述要完成的工作",
+                    "description": "子 Agent 的具体任务目标，应清晰描述要完成的工作（以目标为准，角色只是参考）",
                 },
             },
-            "required": ["role", "goal"],
+            "required": ["goal"],
         },
     },
 }
@@ -1187,6 +1190,25 @@ GROUP_TOOL_LISTS = {
 # 所有按需加载的工具名（用于过滤核心）
 OPTIONAL_TOOL_NAMES = DISCOVERY_TOOL_NAMES | FILE_TOOL_NAMES
 
+# 指挥官（协作模式编排者）只读监控工具集。
+# 指挥官是总调度者，不直接执行测试（发请求 / 爆破 / 文件 / 情报侦察都委派给子 Agent）。
+# 收敛工具定义的好处：
+# - 防止指挥官越权直接攻击（与 COORDINATOR_PROMPT「不直接发 HTTP 请求」对齐）
+# - 消除工具定义与执行层冲突（SENSITIVE_TOOLS 会被执行层挡住，白费模型调用）
+# - 省 Token（指挥官每次请求不再全量携带 43 个工具定义）
+COORDINATOR_READONLY_TOOLS = frozenset({
+    "get_test_coverage",
+    "list_reported_findings",
+    "get_flow_detail",
+    "get_strategy",
+    "get_payload_list",
+    "llm_analyze_evidence",
+    "get_memory",
+    "list_recon_reports",
+    "get_recon_report",
+    "list_flowtag_rules",
+})
+
 # load_tools 工具：始终注入，Agent 需要时加载工具组
 LOAD_TOOLS_TOOL_SCHEMA = {
     "type": "function",
@@ -1219,6 +1241,8 @@ def build_agent_tools(
     db: Session | None = None,
     include_coordinator_tools: bool = False,
     loaded_groups: set[str] | None = None,
+    coordinator_mode: bool = False,
+    exclude_sensitive: bool = False,
 ) -> list[dict]:
     """构建 Agent 可用的完整工具列表（统一入口）。
 
@@ -1236,10 +1260,24 @@ def build_agent_tools(
         include_coordinator_tools: 是否包含指挥官专用工具（spawn_subagent）。
         loaded_groups: 已加载的按需工具组集合（如 {"discovery"}）。
             为 None 时加载全部工具（兼容旧调用：子 Agent/指挥官/测试）。
+        coordinator_mode: 指挥官模式。仅返回只读监控工具 + spawn_subagent，
+            不注入 load_tools / invoke_skill / MCP（执行向工具不进入编排视野）。
+        exclude_sensitive: 剔除 SENSITIVE_TOOLS（run_intruder/run_command/run_script）。
+            子 Agent 无人工确认通道，这些工具执行时会被挡，剔除后模型不再试调。
 
     Returns:
         OpenAI function calling 格式的工具列表。
     """
+    if coordinator_mode:
+        # 指挥官模式：只读监控 + spawn_subagent，直接返回（不走下方动态注入）
+        tools = [
+            t for t in AGENT_TOOLS
+            if t["function"]["name"] in COORDINATOR_READONLY_TOOLS
+        ]
+        if include_coordinator_tools:
+            tools.append(SPAWN_SUBAGENT_TOOL)
+        return tools
+
     if loaded_groups is None:
         tools = list(AGENT_TOOLS)
     else:
@@ -1251,6 +1289,11 @@ def build_agent_tools(
             if t["function"]["name"] not in OPTIONAL_TOOL_NAMES
             or t["function"]["name"] in loaded_names
         ]
+
+    # 子 Agent / 对话等无人工确认通道的场景，剔除敏感工具定义（执行层保护仍在）
+    if exclude_sensitive:
+        sensitive = AgentOrchestrator.SENSITIVE_TOOLS
+        tools = [t for t in tools if t["function"]["name"] not in sensitive]
 
     # load_tools 始终可用（核心工具，用于按需加载工具组）
     tools.append(LOAD_TOOLS_TOOL_SCHEMA)
@@ -1311,6 +1354,12 @@ SYSTEM_PROMPT = """你是 Hemlock 的 AI 安全测试 Agent，辅助用户完成
 
 ## 请求链 / 联动
 - run_request_chain 编排多步（认证链/越权链/API链）；可疑响应提示用户可转发 Repeater/Intruder。
+
+## 子 Agent 分工（spawn_subagent）
+- 遇到**独立、聚焦、多步骤**的工作可 spawn 专职子 Agent 委托执行：scout 收集攻击面、radar 技术栈+CVE 关联、auditor 复核可疑结果、scribe 汇总结报告。
+- 子 Agent 共享测试上下文、发现自动记录，完成后返回摘要。**只委托值得委托的活**——简单/单步操作直接自己做，避免为小事开子 Agent 浪费 token。
+- 子 Agent 是提高效率的手段，不是必须流程；不确定是否需要时，默认自己干。
+- **角色可选不强制**：spawn_subagent 可省略 role（通用执行单元），或按任务类型选最接近的专业角色；无论是否指定角色，子 Agent 都以 goal 任务目标为准执行，不会被角色定位限制。
 
 ## 记忆
 - save_memory 沉淀跨会话经验（4 类：user/feedback/project/reference；feedback/project 含 **Why** + **How to apply**，用 [[名称]] 关联）；get_memory 按需读完整正文。写前查重。
@@ -1435,6 +1484,10 @@ class AgentOrchestrator:
         self.steps: list[dict] = json.loads(task.steps or "[]")
         self.max_steps = 40  # 安全限制
         self._cancelled = False
+        # 对话模式中途插入的用户消息队列（/agent/inject 非阻塞入队，循环顶部 drain）
+        self.inbox: asyncio.Queue = asyncio.Queue()
+        # 标记当前是否为活跃的对话循环（chat_with_agent），供 /agent/inject 判断
+        self._chat_active = False
         self._confirm_event: asyncio.Event | None = None
         self._confirm_approved: bool = False
         # 每个 Agent 任务维护一个会话
@@ -1447,9 +1500,41 @@ class AgentOrchestrator:
         self.loaded_groups: set[str] = set()
 
     def cancel(self):
+        """立即终止：置停止标志 + 丢弃积压的插入消息 + 唤醒确认等待。
+
+        丢弃 inbox 保证用户点停止后，队列中积压的插入消息不会被当作
+        待执行任务继续处理（对齐 Claude Code：停止就是停止）。
+        """
         self._cancelled = True
+        self.clear_inbox()
         if self._confirm_event:
             self._confirm_event.set()
+
+    # ===== 对话模式中途插入消息 =====
+    def enqueue_user_message(self, message: str) -> None:
+        """将用户中途插入的消息放入队列（非阻塞）。"""
+        try:
+            self.inbox.put_nowait(message)
+        except Exception:
+            logger.debug("enqueue_user_message 失败（队列异常）", exc_info=True)
+
+    def drain_inbox(self) -> list[str]:
+        """取出全部积压的插入消息（用于循环顶部一次性处理）。"""
+        msgs: list[str] = []
+        while True:
+            try:
+                msgs.append(self.inbox.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return msgs
+
+    def clear_inbox(self) -> None:
+        """清空队列（停止时调用，丢弃所有未处理消息）。"""
+        while True:
+            try:
+                self.inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     def approve(self):
         self._confirm_approved = True
@@ -1840,7 +1925,33 @@ class AgentOrchestrator:
             return self._tool_get_recon_report(args)
         elif name == "generate_pentest_report":
             return self._tool_generate_pentest_report(args)
+        elif name == "spawn_subagent":
+            # 子 Agent 能力：主 Agent / 指挥官可启动专职子 Agent 执行分工任务
+            return await self._dispatch_spawn_subagent(args)
         return {"error": f"Unknown tool: {name}"}
+
+    async def _dispatch_spawn_subagent(self, args: dict) -> dict:
+        """启动子 Agent 执行分工任务（共享上下文，发现自动记录）。
+
+        复用 run_subagent：子 Agent 使用角色专属 system prompt + 自己的工具循环，
+        完成后返回执行摘要与新增发现。子 Agent 事件（subagent_*）通过 event_bus
+        实时推送给前端渲染嵌套卡片。
+        """
+        sub_role = (args.get("role") or "").strip()
+        sub_goal = (args.get("goal") or "").strip()
+        if not sub_goal:
+            return {"error": "spawn_subagent 需要 goal 参数"}
+        # role 可选：不填 / 填了不存在 → run_subagent 内部回退为通用执行单元
+        return await run_subagent(
+            role_name=sub_role,
+            goal=sub_goal,
+            context=self.context,
+            db=self.db,
+            parent_task_id=self.task.id,
+            provider_id=self.provider_id,
+            # 停止信号传播：用户点停止 → self._cancelled → 子 Agent 下一个边界终止
+            should_stop=lambda: self._cancelled,
+        )
 
     async def _dispatch_invoke_skill(self, args: dict) -> dict:
         """处理 invoke_skill 工具调用（渐进式披露）。"""
@@ -5150,6 +5261,8 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
     tracker.context = context
     # 注册到 _active_agents，使 cancel_agent_task() 能中断对话循环
     _active_agents[task_id] = tracker
+    # 标记为活跃对话循环，供 /agent/inject 判断是否可入队插入消息
+    tracker._chat_active = True
 
     # 1. 从 task.steps 恢复对话历史（传入 db 以注入 Skill 列表，传入 context 用于上下文压缩）
     steps: list[dict] = json.loads(task.steps or "[]")
@@ -5194,8 +5307,25 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
         "content": user_message,
     })
 
+    # 处理中途插入的用户消息：追加到 messages/steps 并发布事件，
+    # 随下一次 LLM 调用一起被 agent 识别（对齐 Claude Code 的下一个思考边界即时识别）。
+    def _inject_pending(pending: list[str]) -> None:
+        for injected in pending:
+            messages.append({"role": "user", "content": injected})
+            _add_chat_step(db, task, steps, "user_message", injected)
+            event_bus.publish("agent", {
+                "event": "chat_message",
+                "task_id": task_id,
+                "role": "user",
+                "content": injected,
+            })
+
     # 3-6. LLM 循环：调用 -> 执行工具 -> 反馈 -> 直到纯文本回复
     while True:
+        # 处理中途插入的用户消息（每个循环边界即时识别，无需等整个回合结束）
+        # 必须在取消检查之前：取消时 inbox 已被 clear_inbox 清空，此处通常为空
+        _inject_pending(tracker.drain_inbox())
+
         # 用户取消检查
         if tracker._cancelled:
             reply = "（用户已中断对话）"
@@ -5212,9 +5342,13 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
             _active_agents.pop(task_id, None)
             return {"reply": reply, "tool_calls": tool_call_records}
 
-        # 统一工具注册：内置 + Skills + MCP
+        # 统一工具注册：内置 + Skills + MCP + spawn_subagent
+        # include_coordinator_tools=True：开放子 Agent 能力，主 Agent 可 spawn 专职子 Agent
         # 达高上限才禁用工具强制总结（兜底防死循环；正常测试流程不受影响）
-        active_tools = build_agent_tools(db, loaded_groups=tracker.loaded_groups) if total_tool_calls < MAX_CHAT_TOOL_CALLS else None
+        active_tools = (
+            build_agent_tools(db, include_coordinator_tools=True, loaded_groups=tracker.loaded_groups)
+            if total_tool_calls < MAX_CHAT_TOOL_CALLS else None
+        )
 
         try:
             # 智能模型路由：根据复杂度选择模型
@@ -5246,6 +5380,7 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
 
             # 使用 asyncio.to_thread 包装同步 streaming LLM 调用，避免阻塞事件循环
             # streaming 模式下，reasoning_content 通过回调实时推送给前端
+            # should_stop：用户点停止时逐 chunk 中断流式读取，立即终止"继续思考"
             # 看门狗：单次 LLM 调用超时（_CHAT_LLM_WATCHDOG）即终止本轮，防止挂起导致"无法停止"
             result = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -5253,11 +5388,14 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
                     messages, tools=active_tools, temperature=0.3,
                     model=_routed_model, provider_id=_routed_pid or provider_id, db=db,
                     on_reasoning=_on_reasoning,
+                    should_stop=lambda: tracker._cancelled,
                 ),
                 timeout=_CHAT_LLM_WATCHDOG,
             )
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}", exc_info=True)
+            # 持久化本轮插入但未处理的消息，避免丢失（下一轮仍可被识别）
+            _inject_pending(tracker.drain_inbox())
             reply = f"LLM 调用失败: {type(e).__name__}: {e}。请稍后重试。"
             _add_chat_step(db, task, steps, "assistant_message", reply)
             task.status = TASK_STATUS_IDLE
@@ -5272,6 +5410,8 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
             return {"reply": reply, "tool_calls": tool_call_records}
 
         if result is None:
+            # 持久化本轮插入但未处理的消息，避免丢失
+            _inject_pending(tracker.drain_inbox())
             reply = "LLM 连续返回空响应，请稍后重试或调整问题。"
             _add_chat_step(db, task, steps, "assistant_message", reply)
             task.status = TASK_STATUS_IDLE
@@ -5314,6 +5454,15 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
 
         # 纯文本回复（或工具已被禁用）-> 结束本轮对话
         if not tool_calls:
+            # 关键：若本次 LLM 调用期间用户插入了新消息，不结束本轮，
+            # continue 回到循环顶部优先识别插入消息（即时度：下一思考边界而非回合结束）。
+            # 竞态兜底：empty() 与 drain 之间可能刚入队，再 drain 一次防止消息丢失。
+            if not tracker.inbox.empty():
+                continue
+            pending = tracker.drain_inbox()
+            if pending:
+                _inject_pending(pending)
+                continue
             reply = content if content else "(AI 暂无回复内容)"
             messages.append({"role": "assistant", "content": reply})
             _add_chat_step(db, task, steps, "assistant_message", reply)
@@ -5426,6 +5575,11 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
             # 自动追踪上下文（与 AgentOrchestrator.run 中的 _auto_track_context 一致）
             tracker._auto_track_context(fn_name, fn_args, tool_result)
 
+            # spawn_subagent：run_subagent 已把子 Agent 内部步骤（subagent_*）写入 DB，
+            # 重新加载 steps 避免本次 _record_chat_tool_call 覆盖丢失
+            if fn_name == "spawn_subagent":
+                steps = json.loads(task.steps or "[]")
+
             # 记录工具调用（steps + 返回列表）
             _record_chat_tool_call(
                 db, task, steps, tool_call_records,
@@ -5535,6 +5689,37 @@ def _override_llm_provider(provider_id: str | None, model: str | None, db: Sessi
             settings.llm_model = old_model
 
 
+# 子 Agent「任务优先原则」：角色是专业背景参考，不是任务范围限制。
+# 角色 prompt 是按领域写的"岗位说明书"（如 scout 只写侦察），若主 Agent 下发的
+# 任务与其不一致（如给 scout 派攻击验证），子 Agent 会走样或拒绝。注入本段使
+# 任务目标成为最高优先级，角色专长只是"做这件事更熟练"。
+_SUBAGENT_TASK_FIRST = """\
+## 任务优先原则
+你的唯一目标是完成主 Agent 下发的任务目标（goal）。角色定位是你的专业背景与工作方法参考，
+帮助你更熟练地完成任务，但**不是任务范围的限制**。
+
+- 若任务目标与角色常见职责不一致，一律以任务目标为准，按任务要求执行
+- 不要因"这不是本角色常做的"而拒绝、推迟或擅自换任务
+- 也不要擅自扩大范围：任务没要求的不做，避免越权或浪费
+
+请严格执行任务目标，完成后回复 TASK_COMPLETE 并给出执行摘要。
+"""
+
+# 通用子 Agent 提示词：未指定角色（spawn_subagent 不填 role）或角色不存在时使用。
+# 不带领域限定，完全以任务目标为准；需要专业方法时通过技能/策略库按需获取。
+_GENERIC_SUBAGENT_PROMPT = """\
+# 子 Agent — 通用执行单元
+你是主 Agent 委派的执行助手，不限定专业领域。
+
+## 执行原则
+- 直接按任务目标要求完成工作，任务没说的不要擅自扩大范围
+- 优先使用可用的内置工具（send_request、run_intruder、verify_vulnerability、report_finding、run_command、analyze_js、fuzz_paths、cve_lookup 等）执行
+- 需要特定测试方法时，通过 invoke_skill 加载相关技能指令，或参考测试策略
+- 每完成一步简要记录进展；发现漏洞立即 verify + report_finding（带证据）
+- 完成后回复 TASK_COMPLETE 并给出执行摘要
+"""
+
+
 async def run_subagent(
     role_name: str,
     goal: str,
@@ -5543,6 +5728,7 @@ async def run_subagent(
     parent_task_id: str,
     provider_id: str | None = None,
     model: str | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     """启动一个子 Agent 执行特定角色任务。
 
@@ -5561,6 +5747,9 @@ async def run_subagent(
         parent_task_id: 父任务 ID，用于工具执行时关联任务。
         provider_id: 指定 LLM Provider，为 None 时用默认配置。
         model: 指定模型名，为 None 时用 Provider 默认或全局默认。
+        should_stop: 轮询的停止回调（通常引用父 tracker._cancelled）。
+            返回 True 时在下一个循环/工具边界立即终止子 Agent，
+            使父任务的"停止"信号传播进子 Agent（否则子 Agent 会跑满 200 步）。
 
     Returns:
         {"role": str, "role_display": str, "summary": str,
@@ -5568,14 +5757,20 @@ async def run_subagent(
     """
     # 确保内置角色文件存在（基于文件的角色注册表）
     ensure_builtin_roles()
+    # role 未指定 → 归一化为 "generic"，保证事件/持久化/前端去重的 role 标识一致
+    role_name = role_name or "generic"
     role = get_role_by_name(db, role_name)
     if not role:
-        return {
-            "role": role_name,
-            "summary": f"未知角色: {role_name}。可用角色: {', '.join(r.name for r in get_all_roles(db))}",
-            "findings": [],
-            "status": "error",
-        }
+        # 角色不存在 → 回退为通用执行单元（不强制选角色，任务目标优先）
+        role = AgentRole(
+            name=role_name,
+            label="通用执行",
+            description="未指定专职角色的通用执行单元",
+            category="custom",
+            is_builtin=False,
+            system_prompt=_GENERIC_SUBAGENT_PROMPT,
+            file_path=None,
+        )
 
     if not _has_llm(db):
         return {
@@ -5585,11 +5780,14 @@ async def run_subagent(
             "status": "error",
         }
 
-    # 子 Agent 工具：内置 + Skills + MCP，排除 spawn_subagent（防止递归）
-    sub_tools = build_agent_tools(db, include_coordinator_tools=False)
+    # 子 Agent 工具：内置 + Skills + MCP，排除 spawn_subagent（防止递归）。
+    # exclude_sensitive：run_intruder/run_command/run_script 无人工确认通道，
+    # 执行时必被挡，直接从定义剔除，避免模型试调浪费。
+    sub_tools = build_agent_tools(db, include_coordinator_tools=False, exclude_sensitive=True)
 
-    # 构建消息历史：角色 system_prompt + 上下文摘要 + 任务目标
-    system_content = role.system_prompt
+    # 构建消息历史：任务优先原则 + 角色 system_prompt + 上下文摘要 + 任务目标
+    # 任务优先原则置顶，优先级最高：防止角色"岗位说明书"与主 Agent 下发任务冲突
+    system_content = _SUBAGENT_TASK_FIRST + "\n" + role.system_prompt
     if context:
         context_prompt = context.build_context_prompt()
         system_content += f"\n\n## 当前测试上下文\n目标 URL: {context.target_url}\n{context_prompt}"
@@ -5599,7 +5797,7 @@ async def run_subagent(
         {"role": "user", "content": (
             f"任务目标: {goal}\n"
             f"目标 URL: {context.target_url if context else '未知'}\n"
-            f"请开始执行你的角色任务。完成后回复 TASK_COMPLETE 并给出执行摘要。"
+            f"请开始执行任务。"
         )},
     ]
 
@@ -5609,12 +5807,20 @@ async def run_subagent(
     if tracker:
         tracker.context = context
 
+    # 子 Agent 内部步骤持久化目标：父任务 steps。
+    # subagent_* 类型步骤会被 _build_chat_messages 跳过，不污染 LLM 历史重建；
+    # 但会被前端 stepsToMessages 还原为嵌套卡片，刷新后工具调用细节不丢失。
+    parent_steps: list[dict] = json.loads(task.steps or "[]") if task else []
+
     # 确保会话存在（子 Agent 共享父任务会话，保持 Cookie/Token）
     session_id = f"agent_{parent_task_id}"
     if not session_manager.get_session(session_id):
         session_manager.create_session(session_id)
 
     # 发布子 Agent 启动事件
+    if task:
+        _add_chat_step(db, task, parent_steps, "subagent_started",
+                       {"role": role_name, "role_display": role.label, "goal": goal})
     event_bus.publish("agent", {
         "event": "subagent_started",
         "task_id": parent_task_id,
@@ -5626,15 +5832,28 @@ async def run_subagent(
 
     findings_before = len(context.findings) if context else 0
     final_content = ""
+    cancelled = False
 
     with _override_llm_provider(provider_id, model, db):
         for step_num in range(MAX_SUBAGENT_STEPS):
+            # 父任务已停止 → 立即终止子 Agent（下一个循环边界）
+            if should_stop is not None and should_stop():
+                cancelled = True
+                final_content = f"{role.label} 已取消"
+                break
             try:
                 # 用 asyncio.to_thread 包装同步 LLM 调用，避免阻塞事件循环
                 result = await asyncio.to_thread(
                     chat_with_retry,
                     messages, tools=sub_tools, temperature=0.3, db=db,
+                    should_stop=should_stop,
                 )
+
+                # LLM 调用期间被停止 → 立即终止
+                if should_stop is not None and should_stop():
+                    cancelled = True
+                    final_content = f"{role.label} 已取消"
+                    break
 
                 if result is None:
                     final_content = f"{role.label} 连续返回空响应，提前结束"
@@ -5644,8 +5863,13 @@ async def run_subagent(
                 tool_calls = result.get("tool_calls")
                 reasoning_content = result.get("reasoning_content", "") or ""
 
-                # 推理内容发布为 thinking 事件
+                # 推理内容发布为 thinking 事件 + 持久化为 subagent_thinking 步骤
+                # （刷新后重建嵌套卡片时还原思考链，_build_chat_messages 会跳过该类型）
                 if reasoning_content:
+                    if task:
+                        _add_chat_step(db, task, parent_steps, "subagent_thinking",
+                                       {"role": role_name, "role_display": role.label,
+                                        "content": reasoning_content})
                     event_bus.publish("agent", {
                         "event": "thinking",
                         "task_id": parent_task_id,
@@ -5670,8 +5894,12 @@ async def run_subagent(
                     "content": content or None,
                     "tool_calls": tool_calls,
                 })
-                # 伴随工具调用的思考内容发布为 thinking 事件
+                # 伴随工具调用的思考内容发布为 thinking 事件 + 持久化为 subagent_thinking
                 if content:
+                    if task:
+                        _add_chat_step(db, task, parent_steps, "subagent_thinking",
+                                       {"role": role_name, "role_display": role.label,
+                                        "content": content})
                     event_bus.publish("agent", {
                         "event": "thinking",
                         "task_id": parent_task_id,
@@ -5716,6 +5944,10 @@ async def run_subagent(
                         tracker._auto_track_context(fn_name, fn_args, tool_result)
 
                     # 发布工具调用与结果事件（带 parent_task_id 和 role 标识）
+                    if task:
+                        _add_chat_step(db, task, parent_steps, "subagent_tool_call",
+                                       {"role": role_name, "role_display": role.label,
+                                        "step": step_num + 1, "tool": fn_name, "args": fn_args})
                     event_bus.publish("agent", {
                         "event": "subagent_tool_call",
                         "task_id": parent_task_id,
@@ -5726,6 +5958,10 @@ async def run_subagent(
                         "tool": fn_name,
                         "args": fn_args,
                     })
+                    if task:
+                        _add_chat_step(db, task, parent_steps, "subagent_tool_result",
+                                       {"role": role_name, "role_display": role.label,
+                                        "step": step_num + 1, "tool": fn_name, "result": tool_result})
                     event_bus.publish("agent", {
                         "event": "subagent_tool_result",
                         "task_id": parent_task_id,
@@ -5742,6 +5978,20 @@ async def run_subagent(
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": _tool_result_to_llm_content(fn_name, fn_args, tool_result),
+                    })
+
+                    # 父任务停止 → 不再执行剩余工具调用，交给外层循环顶部终止
+                    if should_stop is not None and should_stop():
+                        break
+
+                # ===== 上下文更新：每 5 步重注入最新测试上下文 =====
+                # 启动时注入的 context_prompt 是快照，跑久会过期（子 Agent 自己也在
+                # 用工具发现新端点/参数/漏洞，指挥官/主 Agent 之后的决策需要最新进度）。
+                if step_num > 0 and step_num % 5 == 0 and context:
+                    fresh_prompt = context.build_context_prompt()
+                    messages.append({
+                        "role": "user",
+                        "content": f"[系统提示] 以下是当前测试进度更新，请参考决定下一步操作：{fresh_prompt}",
                     })
 
                 # ===== 上下文管理：子 Agent 动态压缩 =====
@@ -5778,6 +6028,11 @@ async def run_subagent(
         new_findings = context.findings[findings_before:]
 
     # 发布子 Agent 完成事件
+    if task:
+        _add_chat_step(db, task, parent_steps, "subagent_complete",
+                       {"role": role_name, "role_display": role.label,
+                        "summary": final_content, "new_findings_count": len(new_findings),
+                        "cancelled": cancelled})
     event_bus.publish("agent", {
         "event": "subagent_complete",
         "task_id": parent_task_id,
@@ -5786,6 +6041,7 @@ async def run_subagent(
         "role_display": role.label,
         "summary": final_content,
         "new_findings_count": len(new_findings),
+        "cancelled": cancelled,
     })
 
     logger.info(
@@ -5798,8 +6054,35 @@ async def run_subagent(
         "role_display": role.label,
         "summary": final_content,
         "findings": new_findings,
-        "status": "complete",
+        "status": "cancelled" if cancelled else "complete",
     }
+
+
+def _mark_task_failed(db: Session, task_id: str) -> None:
+    """将 running/paused 状态的任务标记为失败（取消/异常兜底）。"""
+    try:
+        task = get_task(db, task_id)
+        if task and task.status in (TASK_STATUS_RUNNING, TASK_STATUS_PAUSED):
+            task.status = TASK_STATUS_FAILED
+            task.ended_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(f"协作任务 {task_id} 已标记为失败")
+    except Exception as e:
+        logger.warning(f"标记协作任务 {task_id} 为失败时出错: {e}")
+
+
+def _publish_coordinator_finished(task_id: str, status: str) -> None:
+    """补发协作任务终止事件（前端 runningTasks 对账清除）。
+
+    正常结束由 run_coordinator_task 尾部调用；任务被取消/异常终止时由
+    run_coordinator_in_background 兜底调用，保证任何路径前端都能清除"工作中"。
+    """
+    event_bus.publish("agent", {
+        "event": "coordinator_finished",
+        "task_id": task_id,
+        "status": status,
+        "token_usage": get_token_usage(),
+    })
 
 
 async def run_coordinator_task(
@@ -5902,6 +6185,10 @@ async def run_coordinator_task(
     max_consecutive_errors = 3
     final_status = TASK_STATUS_DONE
 
+    # 指挥官工具集：只读监控 + spawn_subagent（coordinator_mode 收敛）。
+    # 提到循环外一次构建——指挥官无 load_tools / MCP，工具列表运行期静态。
+    active_tools = build_agent_tools(db, include_coordinator_tools=True, coordinator_mode=True)
+
     for step_num in range(MAX_COORDINATOR_STEPS):
         # 用户取消检查
         if tracker._cancelled:
@@ -5912,13 +6199,16 @@ async def run_coordinator_task(
             break
 
         try:
-            # 指挥官工具：内置 + Skills + MCP + spawn_subagent
-            active_tools = build_agent_tools(db, include_coordinator_tools=True)
             # 用 asyncio.to_thread 包装同步 LLM 调用，避免阻塞事件循环
             result = await asyncio.to_thread(
                 chat_with_retry, messages,
                 tools=active_tools, temperature=0.3, db=db,
+                should_stop=lambda: tracker._cancelled,
             )
+
+            # LLM 调用期间被停止 → 不再处理返回内容，交给循环顶部处理取消
+            if tracker._cancelled:
+                continue
 
             if result is None:
                 _add_chat_step(db, task, steps, "error", "指挥官 LLM 连续返回空响应")
@@ -6001,27 +6291,12 @@ async def run_coordinator_task(
                     # ===== 指挥官专用：启动子 Agent =====
                     sub_role = fn_args.get("role", "")
                     sub_goal = fn_args.get("goal", "")
-
-                    # 校验角色
-                    role_def = get_role_by_name(db, sub_role)
-                    if not role_def:
-                        tool_result = {
-                            "error": f"未知角色: {sub_role}",
-                            "available_roles": ["scout", "striker", "auditor", "radar", "scribe"],
-                        }
-                    elif roles and sub_role not in roles:
-                        # 角色不在本次协作列表中，但仍允许（灵活性）
-                        logger.info(f"角色 {sub_role} 不在初始列表 {roles} 中，但仍允许启动")
-                        sub_provider_id = role_providers.get(sub_role)
-                        tool_result = await run_subagent(
-                            role_name=sub_role,
-                            goal=sub_goal,
-                            context=context,
-                            db=db,
-                            parent_task_id=task_id,
-                            provider_id=sub_provider_id,
-                        )
+                    if not sub_goal:
+                        tool_result = {"error": "spawn_subagent 需要 goal 参数"}
                     else:
+                        # role 可选：run_subagent 内部对空/不存在角色回退通用执行单元
+                        if roles and sub_role and sub_role not in roles:
+                            logger.info(f"角色 {sub_role} 不在初始列表 {roles} 中，但仍允许启动")
                         sub_provider_id = role_providers.get(sub_role)
                         tool_result = await run_subagent(
                             role_name=sub_role,
@@ -6030,7 +6305,13 @@ async def run_coordinator_task(
                             db=db,
                             parent_task_id=task_id,
                             provider_id=sub_provider_id,
+                            should_stop=lambda: tracker._cancelled,
                         )
+
+                    # 重新加载 steps：run_subagent 已把子 Agent 内部步骤（subagent_*）写入
+                    # task.steps，本地 steps 已过期。不重载会把这批步骤覆盖丢失
+                    # （与 chat_with_agent spawn 分支的处理一致）。
+                    steps = json.loads(task.steps or "[]")
 
                     _record_chat_tool_call(
                         db, task, steps, [], tc, fn_name, fn_args, tool_result, now_ts,
@@ -6133,12 +6414,7 @@ async def run_coordinator_task(
     usage = get_token_usage()
     logger.info(f"协作任务 {task_id} 完成 | 状态={final_status} | Token={usage}")
 
-    event_bus.publish("agent", {
-        "event": "coordinator_finished",
-        "task_id": task_id,
-        "status": final_status,
-        "token_usage": usage,
-    })
+    _publish_coordinator_finished(task_id, final_status)
 
     # 清理注册
     _active_agents.pop(task_id, None)
@@ -6156,6 +6432,11 @@ async def run_coordinator_in_background(
     """在后台运行指挥官 Agent 任务（供 API 端点 asyncio.create_task 调用）。
 
     自行管理数据库会话生命周期，与 run_agent_task 模式一致。
+    取消/异常兜底：run_coordinator_task 内部的 except Exception 接不住
+    asyncio.CancelledError（BaseException），若不在此处理，任务会跳过它的
+    收尾逻辑（状态更新 / coordinator_finished / _active_agents 清理），
+    形成僵尸任务（task 停留 running 且 _active_agents 持有泄漏的 tracker，
+    看门狗因 tracker 仍在册也清不掉）。
     """
     db = SessionLocal()
     try:
@@ -6167,8 +6448,24 @@ async def run_coordinator_in_background(
             role_providers=role_providers,
             db=db,
         )
-        # 清理上下文
-        remove_context(task_id)
         return status
+    except asyncio.CancelledError:
+        # 任务被取消（事件循环关闭 / create_task 被外部取消）
+        logger.warning(f"协作任务 {task_id} 被取消，标记为失败")
+        _mark_task_failed(db, task_id)
+        _publish_coordinator_finished(task_id, TASK_STATUS_FAILED)
+        raise
+    except Exception as e:
+        logger.error(
+            f"协作任务 {task_id} 发生未捕获异常: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
+        _mark_task_failed(db, task_id)
+        _publish_coordinator_finished(task_id, TASK_STATUS_FAILED)
+        return TASK_STATUS_FAILED
     finally:
+        # 清理上下文与注册（正常/取消/异常都执行，杜绝泄漏）
+        remove_context(task_id)
+        if task_id in _active_agents:
+            _active_agents.pop(task_id, None)
         db.close()

@@ -186,6 +186,31 @@ async def agent_chat(req: ChatRequest, db: Session = Depends(get_db)):
             pass
 
 
+class InjectRequest(BaseModel):
+    """对话任务运行中插入消息请求。"""
+    task_id: str
+    message: str
+
+
+@router.post("/agent/inject")
+async def agent_inject(req: InjectRequest):
+    """任务运行中插入消息：非阻塞入队，下一思考边界即被 Agent 识别。
+
+    对齐 Claude Code 的中途补充消息行为：不打断当前 LLM 思考/工具执行，
+    由 chat_with_agent 在下一个循环边界 drain 并随下次 LLM 调用一起识别。
+
+    - 有活跃对话循环：入队成功，返回 {"queued": true}
+    - 无活跃循环（任务 idle 或非对话模式）：返回 {"queued": false}，
+      前端应回退为正常的阻塞式对话发送
+    """
+    from hemlock.services.agent_service import _active_agents
+    tracker = _active_agents.get(req.task_id)
+    if tracker is not None and getattr(tracker, "_chat_active", False):
+        tracker.enqueue_user_message(req.message)
+        return {"queued": True, "task_id": req.task_id}
+    return {"queued": False, "task_id": req.task_id, "reason": "not_running"}
+
+
 class CreateChatTaskRequest(BaseModel):
     """创建对话式 Agent 任务。"""
     project_id: str | None = None

@@ -1,4 +1,12 @@
-# Hemlock v0.3.1 Release Notes
+# Hemlock v0.4.0 Release Notes
+
+## 本版本亮点 / What's New
+
+- **子 Agent 能力**：对话模式中主 Agent 可启动专职角色分工执行独立子任务，共享上下文、发现自动记录、内部工具调用实时流式展示，刷新后思考链与嵌套卡片不丢失
+- **中途插话即时识别**：Agent 运行中补充消息不打断当前轮、下一思考边界即被识别
+- **终止秒级生效**：点停止即刻中断 LLM 流式思考并清空消息队列
+- **工具调用像思维链一样可折叠展开**：折叠单行摘要、展开看参数与结果
+- **思维链展示优化**：连续思考合并为一个折叠块 + 字数提示，页面不再堆叠
 
 ## 中文说明
 
@@ -6,14 +14,14 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 核心特性
 
-- **ReAct 自主编排引擎**：41 个内置工具，支持 "帮我测试 https://xxx.com" 式自然语言指令，Agent 按 侦察 → 测试 → 验证 → 报告 四阶段自主执行
+- **ReAct 自主编排引擎**：43 个内置工具，支持 "帮我测试 https://xxx.com" 式自然语言指令，Agent 按 侦察 → 测试 → 验证 → 报告 四阶段自主执行
 - **工具按需加载**：核心工具始终可用，发现 / 文件类工具通过 `load_tools` 按需启用，降低每次请求的 Token 开销
 - **攻击面发现工具**：`analyze_js` 从 JS 提取接口、`fuzz_paths` 路径字典爆破，指令驱动式深挖攻击面
 - **N-day 漏洞情报**：`cve_lookup` 按组件+版本查已知 CVE（NVD + cve.circl.lu），`web_search` 联网搜利用细节；先思考后查证，需要时才走代理
 - **上下文智能管理**：缓存前缀稳定 + 索引按需注入 + 渐进式压缩（Session Memory → LLM AutoCompact），长任务不爆上下文
 - **checkpoint 断点续跑**：任务自动保存快照，崩溃或中断后可一键续跑
-- **多 Agent 协作**：5 个内置角色（侦察员/攻击手/验证员/情报员/报告员）共享渗透测试上下文，Coordinator 编排全流程
-- **渐进式技能披露**：98 个内置安全技能，system prompt 只注入索引，完整指令按需加载
+- **多 Agent 协作**：5 个内置角色（侦察员/攻击手/验证员/情报员/报告员）共享渗透测试上下文，Coordinator 编排全流程；对话模式主 Agent 也可直接分工
+- **渐进式技能披露**：99 个内置安全技能，system prompt 只注入索引，完整指令按需加载
 - **漏洞证据链闭环**：每个漏洞附带原始请求/响应包证据，三态验证 + 自动复测
 - **抓包代理**：mitmproxy 代理，FlowTag 正则标注，单击底部面板 / 双击浮动窗口查看数据包
 - **多 LLM 接入**：OpenAI / DeepSeek / Anthropic / 通义千问 / Gemini / Kimi / 智谱 / 百川 / Ollama / 自定义
@@ -21,9 +29,9 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.3.1_x64-setup.exe`
+1. 下载 `Hemlock_0.4.0_x64-setup.exe`
 2. 双击安装并启动
-3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-v4-flash`）
+3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
 5. 创建项目，开始使用
 
@@ -42,13 +50,13 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Key Features
 
-- **ReAct Autonomous Orchestration Engine**: 41 built-in tools, supports natural language instructions like "test https://xxx.com", Agent executes Recon → Test → Verify → Report four-phase autonomous workflow
+- **ReAct Autonomous Orchestration Engine**: 43 built-in tools, supports natural language instructions like "test https://xxx.com", Agent executes Recon → Test → Verify → Report four-phase autonomous workflow
 - **On-Demand Tool Loading**: core tools always available, discovery/file tools enabled via `load_tools` to reduce token overhead
 - **Attack Surface Discovery**: `analyze_js` extracts endpoints from JS, `fuzz_paths` brute-forces paths
 - **Smart Context Management**: stable cache prefix + index-based injection + progressive compaction (Session Memory → LLM AutoCompact)
 - **Checkpoint / Resume**: tasks auto-save snapshots, resume after crash or interruption
-- **Multi-Agent Collaboration**: 5 built-in roles (Recon/Attacker/Verifier/Intelligence/Reporter) sharing context, Coordinator orchestrates the workflow
-- **Progressive Skill Disclosure**: 98 built-in security skills, only index injected into system prompt
+- **Multi-Agent Collaboration**: 5 built-in roles (Recon/Attacker/Verifier/Intelligence/Reporter) sharing context, Coordinator orchestrates the workflow; chat-mode main Agent can delegate directly
+- **Progressive Skill Disclosure**: 99 built-in security skills, only index injected into system prompt
 - **Vulnerability Evidence Chain**: every finding includes raw request/response evidence, three-state verification + auto-retest
 - **Packet Capture**: mitmproxy proxy, FlowTag regex annotation, click for bottom panel / double-click for floating window
 - **Multi-LLM Support**: OpenAI / DeepSeek / Anthropic / Qwen / Gemini / Kimi / Zhipu / Baichuan / Ollama / Custom
@@ -56,9 +64,9 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Installation
 
-1. Download `Hemlock_0.3.1_x64-setup.exe`
+1. Download `Hemlock_0.4.0_x64-setup.exe`
 2. Double-click to install and launch
-3. Configure LLM API Key in Settings (model: `deepseek-v4-flash` recommended)
+3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate
 5. Create a project and start testing
 

@@ -171,6 +171,18 @@ export const agentChatApi = {
     );
     return data;
   },
+  // 任务运行中插入消息：非阻塞入队，Agent 下一思考边界即时识别
+  // 返回 { queued: true } 表示已入队；{ queued: false } 表示无活跃循环，需回退阻塞发送
+  inject: async (
+    task_id: string,
+    message: string
+  ): Promise<{ queued: boolean; task_id: string }> => {
+    const { data } = await client.post<{ queued: boolean; task_id: string }>(
+      "/agent/inject",
+      { task_id, message }
+    );
+    return data;
+  },
   // 删除对话
   deleteConversation: async (task_id: string): Promise<void> => {
     await client.delete(`/agent/conversations/${task_id}`);
