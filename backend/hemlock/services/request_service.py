@@ -28,6 +28,34 @@ _DEFAULT_TIMEOUT = httpx.Timeout(
     pool=5.0,       # 连接池等待超时
 )
 
+# 默认请求头：主流浏览器默认配置（Chrome Windows），
+# 替代 httpx 自带的 python-httpx/x.y.z 标识，让发出的请求更贴近真实浏览器流量。
+# 浏览器带哪些头，默认数据包就带哪些头（Host、Content-Length 等由 httpx 自动补充）。
+_BROWSER_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    # 仅声明 httpx 可解码的编码（gzip/deflate），避免 br/zstd 响应乱码
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
+
 
 async def get_client() -> httpx.AsyncClient:
     """获取共享的 AsyncClient 实例（懒加载）。
@@ -36,9 +64,8 @@ async def get_client() -> httpx.AsyncClient:
     确保 AI 发送的请求直连目标，不经过 mitmproxy 代理。
     避免同一请求被代理捕获产生重复 Flow 记录，且被杂包过滤器误判。
 
-    X-Hemlock-Source 头：标识此请求由 AI Agent 发出，
-    供代理层 CaptureAddon 白名单使用（防御性措施：即使后续
-    有人改回 trust_env=True，代理层仍可识别并跳过杂包检测）。
+    默认请求头使用主流浏览器默认配置（见 _BROWSER_DEFAULT_HEADERS），
+    不再携带自定义 X-Hemlock-Source 标识头——请求从外观上就是普通浏览器流量。
     """
     global _shared_client
     if _shared_client is None or _shared_client.is_closed:
@@ -49,7 +76,7 @@ async def get_client() -> httpx.AsyncClient:
             limits=_POOL_LIMITS,
             http2=False,  # 大多数目标不支持 HTTP/2
             trust_env=False,  # 不使用系统代理，AI 请求直连目标
-            headers={"X-Hemlock-Source": "agent"},  # 标识 AI 请求，供代理层白名单
+            headers=dict(_BROWSER_DEFAULT_HEADERS),  # 浏览器默认请求头
         )
         logger.debug("HTTP 连接池已初始化 (max_connections=50, trust_env=False)")
     return _shared_client

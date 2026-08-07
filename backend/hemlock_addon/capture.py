@@ -85,21 +85,15 @@ class CaptureAddon:
                     resp_body_str,
                 )
 
-                # AI Agent 发出的请求（携带 X-Hemlock-Source 头）直接加入白名单，
-                # 跳过杂包检测，避免渗透测试请求被误判为杂包
-                is_agent_request = flow.request.headers.get("X-Hemlock-Source", "") == "agent"
-
-                if is_agent_request:
-                    is_noise = False
-                    noise_reason = ""
-                else:
-                    # 自动检测是否为杂包
-                    is_noise, noise_reason = check_noise(
-                        flow.request.pretty_url,
-                        flow.request.method,
-                        resp_status,
-                        resp_body_str,
-                    )
+                # 自动检测是否为杂包
+                # 说明：AI Agent 的请求使用 trust_env=False 直连目标、不经过代理，
+                # 因此不会出现在这里，无需特殊的自定义头白名单。
+                is_noise, noise_reason = check_noise(
+                    flow.request.pretty_url,
+                    flow.request.method,
+                    resp_status,
+                    resp_body_str,
+                )
 
                 flow_record = Flow(
                     project_id=project_id,
