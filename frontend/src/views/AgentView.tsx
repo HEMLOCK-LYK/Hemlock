@@ -96,6 +96,8 @@ interface SubagentInfo {
   running: boolean;
   /** 子 Agent 的思考链（subagent_thinking 步骤，刷新后重建展示） */
   thinking?: string[];
+  /** 思考链最后一段是否正在流式输出（subagent_thinking_delta 实时追加） */
+  thinkingStreaming?: boolean;
 }
 
 // ===== 工具函数 =====
@@ -252,11 +254,18 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
           newFindingsCount = Number(sd.new_findings_count ?? 0);
           running = false;
         } else if (st === "tool_call") {
-          // 尾部 spawn_subagent 记录（run_subagent 返回后由 chat_with_agent 追加）
+          // 尾部 spawn_subagent 记录（run_subagent 返回后由 chat_with_agent 追加）。
+          // subagent_complete 已写，summary 通常已有值，这里仅做兜底；
+          // 必须把紧随的 tool_result 一并消费，否则外层会重复生成卡片 / 泄漏空 system 消息。
           const sd = parseStepRaw(steps[i].data);
-          if (sd.tool === "spawn_subagent" && !summary) {
-            const res = (sd.result as Record<string, unknown>) || {};
-            summary = String(res.summary ?? "");
+          if (sd.tool === "spawn_subagent") {
+            if (!summary) {
+              const res = (sd.result as Record<string, unknown>) || {};
+              summary = String(res.summary ?? "");
+            }
+            if (i + 1 < n && steps[i + 1].type === "tool_result") {
+              i += 1;
+            }
           }
         } else {
           break;
@@ -277,6 +286,7 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
           newFindingsCount,
           running,
           thinking,
+          thinkingStreaming: false,
         },
         timestamp: step.timestamp,
       });
@@ -475,6 +485,10 @@ export function AgentView() {
   const thinkingDeltaBufferRef = useRef<Map<string, string>>(new Map());
   // 定时器 ID，null 表示未调度
   const thinkingRafRef = useRef<number | null>(null);
+  // 子 Agent 思考链 delta 累积缓冲区（"taskId|role" -> 累积的 delta 字符串）
+  const subagentThinkingBufferRef = useRef<Map<string, string>>(new Map());
+  // 子 Agent 思考链定时器 ID
+  const subagentThinkingRafRef = useRef<number | null>(null);
 
   const projectId = currentProject?.id ?? null;
 
@@ -805,12 +819,58 @@ export function AgentView() {
     });
   }, []);
 
+  // 批量刷新子 Agent 思考链 delta：累积到对应卡片 thinking 数组的最后一段（流式段）
+  const flushSubagentThinking = useCallback(() => {
+    subagentThinkingRafRef.current = null;
+    const buffer = subagentThinkingBufferRef.current;
+    if (buffer.size === 0) return;
+
+    const entries = Array.from(buffer.entries());
+    buffer.clear();
+
+    setOptimisticByTask((prev) => {
+      let updated = prev;
+      for (const [key, delta] of entries) {
+        const sep = key.indexOf("|");
+        if (sep === -1) continue;
+        const tid = key.slice(0, sep);
+        const role = key.slice(sep + 1);
+        const msgs = updated[tid] ?? [];
+        // 从后往前找 running 中同 role 的子 Agent 卡片
+        const idx = [...msgs].reverse().findIndex(
+          (m) => m.role === "subagent" && m.subagent?.role === role && m.subagent.running
+        );
+        if (idx === -1) continue;
+        const realIdx = msgs.length - 1 - idx;
+        const newMsgs = [...msgs];
+        const sub = { ...newMsgs[realIdx].subagent! };
+        const thinking = [...(sub.thinking ?? [])];
+        if (sub.thinkingStreaming && thinking.length > 0) {
+          // 已有流式段：追加 delta 到最后一段
+          thinking[thinking.length - 1] += delta;
+        } else {
+          // 新建流式段
+          thinking.push(delta);
+          sub.thinkingStreaming = true;
+        }
+        sub.thinking = thinking;
+        newMsgs[realIdx] = { ...newMsgs[realIdx], subagent: sub };
+        updated = { ...updated, [tid]: newMsgs };
+      }
+      return updated;
+    });
+  }, []);
+
   // 组件卸载时取消 pending 定时器
   useEffect(() => {
     return () => {
       if (thinkingRafRef.current !== null) {
         clearTimeout(thinkingRafRef.current);
         thinkingRafRef.current = null;
+      }
+      if (subagentThinkingRafRef.current !== null) {
+        clearTimeout(subagentThinkingRafRef.current);
+        subagentThinkingRafRef.current = null;
       }
     };
   }, []);
@@ -990,11 +1050,64 @@ export function AgentView() {
                   newFindingsCount: 0,
                   running: true,
                   thinking: [],
+                  thinkingStreaming: false,
                 },
                 timestamp: now,
               },
             ],
           }));
+          return;
+        }
+
+        // 子 Agent 思考链流式增量：累积到缓冲区，批量 flush 到卡片内（不插入主会话流）
+        if (event.event === "subagent_thinking_delta") {
+          const role = (event.role as string) || "";
+          const delta = (event.delta as string) || "";
+          if (delta && role) {
+            const key = `${taskId}|${role}`;
+            const current = subagentThinkingBufferRef.current.get(key) || "";
+            subagentThinkingBufferRef.current.set(key, current + delta);
+            if (subagentThinkingRafRef.current === null) {
+              subagentThinkingRafRef.current = window.setTimeout(flushSubagentThinking, 150);
+            }
+          }
+          return;
+        }
+
+        // 子 Agent 思考链完整内容：覆盖流式段（或追加一段）
+        if (event.event === "subagent_thinking_done") {
+          if (subagentThinkingRafRef.current !== null) {
+            clearTimeout(subagentThinkingRafRef.current);
+            subagentThinkingRafRef.current = null;
+          }
+          const role = (event.role as string) || "";
+          const fullContent = (event.content as string) || "";
+          // 清空该 role 未 flush 的缓冲（done 已含完整内容）
+          if (role) subagentThinkingBufferRef.current.delete(`${taskId}|${role}`);
+          if (fullContent && role) {
+            setOptimisticByTask((prev) => {
+              const msgs = prev[taskId] ?? [];
+              const idx = [...msgs].reverse().findIndex(
+                (m) => m.role === "subagent" && m.subagent?.role === role && m.subagent.running
+              );
+              if (idx === -1) return prev;
+              const realIdx = msgs.length - 1 - idx;
+              const updated = [...msgs];
+              const sub = { ...updated[realIdx].subagent! };
+              const thinking = [...(sub.thinking ?? [])];
+              if (sub.thinkingStreaming && thinking.length > 0) {
+                // 覆盖最后一段流式段为完整内容
+                thinking[thinking.length - 1] = fullContent;
+              } else {
+                // 追加一段（非流式一次性内容）
+                thinking.push(fullContent);
+              }
+              sub.thinking = thinking;
+              sub.thinkingStreaming = false;
+              updated[realIdx] = { ...updated[realIdx], subagent: sub };
+              return { ...prev, [taskId]: updated };
+            });
+          }
           return;
         }
 
@@ -1068,6 +1181,7 @@ export function AgentView() {
                 summary: (event.summary as string) || "",
                 newFindingsCount: (event.new_findings_count as number) || 0,
                 running: false,
+                thinkingStreaming: false,
               },
             };
             return { ...prev, [taskId]: updated };
@@ -1133,7 +1247,7 @@ export function AgentView() {
         refreshTasks();
       }
     },
-    [refreshTaskDetail, refreshTasks, sendToRepeater, navigate, flushThinkingDeltas]
+    [refreshTaskDetail, refreshTasks, sendToRepeater, navigate, flushThinkingDeltas, flushSubagentThinking]
   );
 
   // WS (重)连成功后重同步：断开期间的事件丢失，刷新任务列表 + 当前任务详情兜底

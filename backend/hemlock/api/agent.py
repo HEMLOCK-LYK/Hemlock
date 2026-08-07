@@ -203,10 +203,18 @@ async def agent_inject(req: InjectRequest):
     - 无活跃循环（任务 idle 或非对话模式）：返回 {"queued": false}，
       前端应回退为正常的阻塞式对话发送
     """
-    from hemlock.services.agent_service import _active_agents
+    from hemlock.services.agent_service import _active_agents, _active_subagent_inboxes
     tracker = _active_agents.get(req.task_id)
     if tracker is not None and getattr(tracker, "_chat_active", False):
+        # 广播语义：同一句用户消息同时进主 Agent inbox 与当前活跃子 Agent inbox。
+        # 主 Agent 下一边界识别；子 Agent（若有）在其自身循环顶部 drain 并调整方向。
         tracker.enqueue_user_message(req.message)
+        sub_inbox = _active_subagent_inboxes.get(req.task_id)
+        if sub_inbox is not None:
+            try:
+                sub_inbox.put_nowait(req.message)
+            except asyncio.QueueFull:
+                pass  # 队列满则不阻塞（子 Agent 循环下一边界仍会读到已有消息）
         return {"queued": True, "task_id": req.task_id}
     return {"queued": False, "task_id": req.task_id, "reason": "not_running"}
 

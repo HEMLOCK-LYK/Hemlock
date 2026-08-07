@@ -2873,7 +2873,6 @@ class AgentOrchestrator:
                     url=url,
                     params=query_params if query_params else None,
                     json=body if body is not None else None,
-                    headers={"X-Hemlock-Source": "agent"},
                 )
 
             # 解析响应
@@ -4608,6 +4607,27 @@ def list_tasks(db: Session, limit: int = 50, project_id: str | None = None) -> l
 
 _active_agents: dict[str, AgentOrchestrator] = {}
 
+# 当前活跃子 Agent 的中途消息 inbox（key: parent_task_id -> asyncio.Queue）。
+# 子 Agent 与主 Agent 各自维护独立 inbox；串行模式下同一时间只有一个活跃子 Agent，
+# 用 parent_task_id 作 key 足够。用户中途消息经 /agent/inject 广播到两侧。
+_active_subagent_inboxes: dict[str, asyncio.Queue] = {}
+
+
+@contextmanager
+def _subagent_inbox_lifecycle(parent_task_id: str):
+    """子 Agent 中途消息 inbox 生命周期：进入注册、退出清理。
+
+    /agent/inject 广播用户消息到当前活跃子 Agent 时，通过 _active_subagent_inboxes
+    找到对应 queue；子 Agent 循环顶部 drain 注入自身上下文。无论正常结束还是被取消，
+    退出 with 块即清理注册，不留脏数据。
+    """
+    inbox: asyncio.Queue = asyncio.Queue()
+    _active_subagent_inboxes[parent_task_id] = inbox
+    try:
+        yield inbox
+    finally:
+        _active_subagent_inboxes.pop(parent_task_id, None)
+
 
 async def run_agent_task(task_id: str, goal: str, target_url: str) -> str:
     """在后台运行 Agent 任务。"""
@@ -5834,19 +5854,52 @@ async def run_subagent(
     final_content = ""
     cancelled = False
 
-    with _override_llm_provider(provider_id, model, db):
+    # 子 Agent 中途消息 inbox：用户广播消息下一边界注入（广播语义 = 主 Agent + 子 Agent 都听到）
+    with _override_llm_provider(provider_id, model, db), \
+         _subagent_inbox_lifecycle(parent_task_id) as subagent_inbox:
         for step_num in range(MAX_SUBAGENT_STEPS):
             # 父任务已停止 → 立即终止子 Agent（下一个循环边界）
             if should_stop is not None and should_stop():
                 cancelled = True
                 final_content = f"{role.label} 已取消"
                 break
+
+            # 用户中途消息广播：drain 子 Agent inbox，注入上下文让子 Agent 调整方向。
+            # 用户消息已在主会话乐观显示（前端 handleSend 的 opt-user），子 Agent 的
+            # 响应通过卡片内思考链 / 工具调用实时反馈，这里无需再发额外显示事件。
+            if not subagent_inbox.empty():
+                drained_msgs = []
+                while not subagent_inbox.empty():
+                    drained_msgs.append(subagent_inbox.get_nowait())
+                for msg in drained_msgs:
+                    messages.append({
+                        "role": "user",
+                        "content": f"[用户中途指示] {msg}",
+                    })
             try:
-                # 用 asyncio.to_thread 包装同步 LLM 调用，避免阻塞事件循环
-                result = await asyncio.to_thread(
-                    chat_with_retry,
-                    messages, tools=sub_tools, temperature=0.3, db=db,
-                    should_stop=should_stop,
+                # 流式 LLM 调用（与主 Agent chat_with_agent 体验对齐）：
+                # - reasoning 逐 chunk 实时推送 subagent_thinking_delta → 前端卡片内实时显示思考，
+                #   不再一次性等待完整响应（修复"子 Agent 开始工作后无任何反馈"）
+                # - should_stop 逐 chunk 检查 → 点停止立即中断流式读取（修复"停止无效"）
+                # - 看门狗超时兜底防 LLM 挂起（修复"卡住"）
+                def _on_reasoning(delta: str):
+                    event_bus.publish("agent", {
+                        "event": "subagent_thinking_delta",
+                        "task_id": parent_task_id,
+                        "parent_task_id": parent_task_id,
+                        "role": role_name,
+                        "role_display": role.label,
+                        "delta": delta,
+                    })
+
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        chat_stream_with_retry,
+                        messages, tools=sub_tools, temperature=0.3, db=db,
+                        on_reasoning=_on_reasoning,
+                        should_stop=should_stop,
+                    ),
+                    timeout=_CHAT_LLM_WATCHDOG,
                 )
 
                 # LLM 调用期间被停止 → 立即终止
@@ -5863,17 +5916,20 @@ async def run_subagent(
                 tool_calls = result.get("tool_calls")
                 reasoning_content = result.get("reasoning_content", "") or ""
 
-                # 推理内容发布为 thinking 事件 + 持久化为 subagent_thinking 步骤
-                # （刷新后重建嵌套卡片时还原思考链，_build_chat_messages 会跳过该类型）
+                # 推理内容持久化为 subagent_thinking 步骤（完整内容，流式段已通过 delta 实时推送，
+                # 前端用 done 事件覆盖流式段）。_build_chat_messages 会跳过该类型，不污染 LLM 历史。
                 if reasoning_content:
                     if task:
                         _add_chat_step(db, task, parent_steps, "subagent_thinking",
                                        {"role": role_name, "role_display": role.label,
                                         "content": reasoning_content})
                     event_bus.publish("agent", {
-                        "event": "thinking",
+                        "event": "subagent_thinking_done",
                         "task_id": parent_task_id,
-                        "content": f"[{role.label}] {reasoning_content}",
+                        "parent_task_id": parent_task_id,
+                        "role": role_name,
+                        "role_display": role.label,
+                        "content": reasoning_content,
                     })
 
                 # 子 Agent 返回 TASK_COMPLETE → 结束
@@ -5894,16 +5950,19 @@ async def run_subagent(
                     "content": content or None,
                     "tool_calls": tool_calls,
                 })
-                # 伴随工具调用的思考内容发布为 thinking 事件 + 持久化为 subagent_thinking
+                # 伴随工具调用的思考内容持久化 + 发布 done（完整内容，前端覆盖流式段）
                 if content:
                     if task:
                         _add_chat_step(db, task, parent_steps, "subagent_thinking",
                                        {"role": role_name, "role_display": role.label,
                                         "content": content})
                     event_bus.publish("agent", {
-                        "event": "thinking",
+                        "event": "subagent_thinking_done",
                         "task_id": parent_task_id,
-                        "content": f"[{role.label}] {content}",
+                        "parent_task_id": parent_task_id,
+                        "role": role_name,
+                        "role_display": role.label,
+                        "content": content,
                     })
 
                 # 逐个执行工具
@@ -6199,11 +6258,23 @@ async def run_coordinator_task(
             break
 
         try:
-            # 用 asyncio.to_thread 包装同步 LLM 调用，避免阻塞事件循环
-            result = await asyncio.to_thread(
-                chat_with_retry, messages,
-                tools=active_tools, temperature=0.3, db=db,
-                should_stop=lambda: tracker._cancelled,
+            # 流式 LLM 调用（对齐主 Agent）：reasoning 实时推送，停止逐 chunk 生效，
+            # 看门狗超时兜底防挂起
+            def _on_coordinator_reasoning(delta: str):
+                event_bus.publish("agent", {
+                    "event": "thinking_delta",
+                    "task_id": task_id,
+                    "delta": delta,
+                })
+
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    chat_stream_with_retry, messages,
+                    tools=active_tools, temperature=0.3, db=db,
+                    on_reasoning=_on_coordinator_reasoning,
+                    should_stop=lambda: tracker._cancelled,
+                ),
+                timeout=_CHAT_LLM_WATCHDOG,
             )
 
             # LLM 调用期间被停止 → 不再处理返回内容，交给循环顶部处理取消
@@ -6219,11 +6290,11 @@ async def run_coordinator_task(
             tool_calls = result.get("tool_calls")
             reasoning_content = result.get("reasoning_content", "") or ""
 
-            # 推理内容发布为 thinking 事件
+            # 推理内容持久化 + 发布 thinking_done（流式段已通过 thinking_delta 实时推送，done 覆盖）
             if reasoning_content:
                 _add_chat_step(db, task, steps, "thinking", reasoning_content)
                 event_bus.publish("agent", {
-                    "event": "thinking",
+                    "event": "thinking_done",
                     "task_id": task_id,
                     "content": reasoning_content,
                 })
