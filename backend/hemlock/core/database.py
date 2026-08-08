@@ -88,6 +88,16 @@ def _migrate_add_columns() -> None:
         if "checkpoint" not in task_columns:
             conn.execute(text("ALTER TABLE tasks ADD COLUMN checkpoint TEXT DEFAULT '{}'"))
             conn.commit()
+        if "memory_snapshot" not in task_columns:
+            conn.execute(text("ALTER TABLE tasks ADD COLUMN memory_snapshot TEXT"))
+            conn.commit()
+
+        # 检查 llm_providers 表是否有 context_window 列（上下文窗口，tokens，空=兜底）
+        result = conn.execute(text("PRAGMA table_info(llm_providers)"))
+        provider_columns = [row[1] for row in result]
+        if "context_window" not in provider_columns:
+            conn.execute(text("ALTER TABLE llm_providers ADD COLUMN context_window INTEGER"))
+            conn.commit()
 
 
 def get_db():

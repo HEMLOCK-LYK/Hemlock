@@ -8,6 +8,7 @@ export interface LLMProvider {
   provider: string;
   base_url: string;
   model: string;
+  context_window: number | null;
   is_default: boolean;
   api_key_masked: string;
 }
@@ -23,6 +24,7 @@ export interface ProviderCreateRequest {
   api_key: string;
   base_url: string;
   model: string;
+  context_window?: number | null;
   is_default?: boolean;
 }
 
@@ -32,6 +34,7 @@ export interface ProviderUpdateRequest {
   api_key?: string;
   base_url?: string;
   model?: string;
+  context_window?: number | null;
   is_default?: boolean;
 }
 

@@ -29,6 +29,7 @@ class ProviderCreateRequest(BaseModel):
     api_key: str
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
+    context_window: int | None = None   # 上下文窗口（tokens），空=走兜底
     is_default: bool = False
 
 
@@ -39,6 +40,7 @@ class ProviderUpdateRequest(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
+    context_window: int | None = None
     is_default: bool | None = None
 
 
@@ -49,6 +51,7 @@ class ProviderResponse(BaseModel):
     provider: str
     base_url: str
     model: str
+    context_window: int | None = None
     is_default: bool
     # 注意：不返回 api_key 明文，只返回 masked 版本
     api_key_masked: str
@@ -81,6 +84,7 @@ def _to_response(provider: LLMProvider) -> ProviderResponse:
         provider=provider.provider,
         base_url=provider.base_url,
         model=provider.model,
+        context_window=provider.context_window,
         is_default=provider.is_default,
         api_key_masked=_mask_api_key(provider.api_key),
     )
@@ -134,6 +138,7 @@ async def create_provider(req: ProviderCreateRequest, db: Session = Depends(get_
         api_key=req.api_key,
         base_url=req.base_url,
         model=req.model,
+        context_window=req.context_window,
         is_default=req.is_default,
     )
 

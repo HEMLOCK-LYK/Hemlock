@@ -313,6 +313,31 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
       continue;
     }
 
+    // compaction：上下文压缩分界线，显示压缩摘要（原始步骤仍在 steps 中展示）
+    if (step.type === "compaction") {
+      const raw = parseStepRaw(step.data);
+      const compMsgs = Array.isArray(raw.messages)
+        ? (raw.messages as Array<{ role?: string; content?: unknown }>)
+        : [];
+      const firstUser = compMsgs.find((m) => m?.role === "user");
+      let text = "";
+      if (firstUser && typeof firstUser.content === "string") {
+        text = firstUser.content;
+      } else if (typeof raw.summary === "string") {
+        text = raw.summary;
+      }
+      if (text) {
+        result.push({
+          id: `step-${stepIndex}`,
+          role: "system",
+          content: `[上下文压缩分界线 · ${String(raw.method ?? "")}] ${text.slice(0, 600)}${text.length > 600 ? "…" : ""}`,
+          timestamp: step.timestamp,
+        });
+      }
+      i += 1;
+      continue;
+    }
+
     let role: ParsedMessage["role"] = "system";
     if (step.type === "user_message" || step.type === "user") {
       role = "user";

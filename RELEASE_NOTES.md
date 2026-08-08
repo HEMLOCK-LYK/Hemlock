@@ -1,16 +1,14 @@
-# Hemlock v0.4.2 Release Notes
+# Hemlock v0.4.3 Release Notes
 
 ## 本版本亮点 / What's New
 
-- **缓存友好的 system 拆分**：system prompt 拆为「稳定段 + 动态段」，稳定段（角色 + 渗透策略）逐字节不变、命中 Anthropic 显式断点 / DeepSeek-OpenAI 自动前缀缓存；动态段（技能 / MCP / 记忆）变化不影响稳定前缀
-- **确定性索引排序**：技能 / 记忆索引按名称确定性排序，集合不变时注入文本逐字节一致，缓存不因排列变化而失效
-- **长期记忆放入 system 动态段**：记忆留在 system（永不压缩）且位于缓存断点之外，技能 / 记忆增删不影响缓存命中
+- **上下文压缩分界线机制（核心）**：压缩结果固化到任务轨迹，恢复时线性展开、不再每轮全量重算——彻底修复「热窗口滑动截取导致历史段缓存命中率 0」的根因。平时纯追加保持历史前缀逐字节稳定，DeepSeek 自动前缀缓存持续命中；仅当追加区超预算（上下文窗口的 50%）才推进压缩分界线，对话越长缓存收益越大
+- **分界线推进挂 AutoCompact LLM 层**：压缩走 Session Memory → LLM 摘要 → 确定性删减三层，失败自动降级，压缩质量更高、不打断对话
+- **记忆快照 + 分级过滤**：对话开始时固化 global + 当前项目记忆为独立快照，期间不可变、中途写入不回流，快照逐字节稳定可命中缓存；项目记忆互不串扰
+- **Provider 上下文窗口可配置**：API Key 管理页填写 context_window（主流大模型普遍 1M），触发时机按你的模型精确控制；留空自动按服务商兜底
 - **数据转发补全**：漏洞管理页、数据详情页一键发送到重放器 / 爆破器 / AI 助手，与流量列表完全一致
-- **统一流量显示**：漏洞与数据详情复用同一套报文渲染组件，效果统一、减少差异
 - **中途插话即时识别**：Agent 运行中补充消息不打断当前轮、下一思考边界即被识别，并同步广播给子 Agent
-- **子 Agent 思考流式实时显示**：逐段推送思考内容，停止秒级生效，刷新后不丢失
 - **Markdown 完整渲染**：记忆详情、报告查看、收集摘要等 Markdown 内容正确渲染（标题 / 表格 / 代码高亮 / 一键复制）
-- **浏览器化请求头**：代理发出的请求使用 Chrome 默认 User-Agent 与完整请求头，流量更贴近真实浏览器
 
 ## 中文说明
 
@@ -33,7 +31,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.4.2_x64-setup.exe`
+1. 下载 `Hemlock_0.4.3_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -68,7 +66,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Installation
 
-1. Download `Hemlock_0.4.2_x64-setup.exe`
+1. Download `Hemlock_0.4.3_x64-setup.exe`
 2. Double-click to install and launch
 3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate

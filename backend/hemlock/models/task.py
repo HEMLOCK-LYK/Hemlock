@@ -37,6 +37,9 @@ class Task(Base):
     # checkpoint 支持（对齐 Claude Code 的会话持久化）：
     messages = Column(Text, default="[]")  # JSON 数组，当前 LLM 消息历史（周期保存，供恢复）
     checkpoint = Column(Text, default="{}")  # JSON，PentestContext + 步数快照（供恢复）
+    # 记忆快照：对话开始时固化的记忆索引（仅 global + 当前 project），期间不可变，
+    # 中途 save_memory 不回流——保证快照消息逐字节稳定、可被前缀缓存命中。
+    memory_snapshot = Column(Text, nullable=True)
 
     started_at = Column(DateTime(timezone=True), default=_utcnow)
     ended_at = Column(DateTime(timezone=True), nullable=True)

@@ -461,24 +461,64 @@ def format_memory_for_prompt(memories: list) -> str:
     return "\n".join(lines)
 
 
-def build_memories_prompt(db: Any = None, text: str | None = None, n_results: int = 5) -> str:
+def build_memories_prompt(
+    db: Any = None,
+    text: str | None = None,
+    n_results: int = 5,
+    project_id: str | None = None,
+) -> str:
     """构建注入系统提示词的记忆文本（全量加载）。
 
-    全量加载所有记忆到 system prompt，由 LLM 自身判断相关性。
+    分级过滤：加载 global 目录 + 指定 project 目录（project_id 为空时不加载
+    任何项目级记忆，避免跨项目记忆串扰当前任务）。记忆过多时由 LLM 自行判断
+    相关性，正文按需经 get_memory 工具读取。
 
     Args:
         db: 保留参数兼容已有调用方，实际不使用。
         text: 保留参数兼容已有调用方，实际不使用。
         n_results: 保留参数兼容已有调用方，实际不使用。
+        project_id: 当前项目 ID，仅加载该项目 + global 的记忆；
+                    为空时不加载任何项目级记忆（避免跨项目串扰）。
 
     Returns:
         格式化的记忆提示词文本，无记忆时返回空字符串
     """
-    memories = list_memories(db)
+    if project_id:
+        memories = list_memories(db, project_id=project_id)
+    else:
+        # 不指定项目：只加载 global（list_memories(None) 是全量，语义不同）
+        _ensure_dirs()
+        memories = _scan_dir(GLOBAL_DIR)
     if not memories:
         return ""
 
     return format_memory_for_prompt(memories)
+
+
+def build_memory_snapshot(db: Any = None, project_id: str | None = None) -> str:
+    """构建对话开始时的记忆快照（分级过滤：仅 global + 当前 project）。
+
+    快照在对话开始时生成一次并固化到 task.memory_snapshot，期间不可变——
+    中途 save_memory 不回流，保证快照消息逐字节稳定、可被前缀缓存命中。
+
+    Returns:
+        格式化快照文本，无记忆时返回空字符串
+    """
+    if project_id:
+        memories = list_memories(db, project_id=project_id)
+    else:
+        _ensure_dirs()
+        memories = _scan_dir(GLOBAL_DIR)
+    if not memories:
+        return ""
+
+    index = format_memory_for_prompt(memories)
+    return (
+        "## 长期记忆（对话开始时的快照，跨会话保留）\n"
+        "以下是本对话开始时已沉淀的经验索引。快照在对话开始后不再更新，"
+        "与当前任务有关时用 get_memory 工具读取其完整内容：\n"
+        + index
+    )
 
 
 def search_by_trigger(db: Any = None, text: str = "", n_results: int = 5) -> list[dict[str, Any]]:

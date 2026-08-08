@@ -1576,22 +1576,10 @@ class AgentOrchestrator:
             logger.warning(f"checkpoint 恢复失败，从头开始（非致命）: {e}")
 
         if not restored:
-            # 加载长期记忆
-            memory_prompt = ""
-            try:
-                from hemlock.core.memory_manager import build_memories_prompt
-                memory_prompt = build_memories_prompt(self.db)
-                if memory_prompt:
-                    logger.info("已加载长期记忆")
-            except Exception as e:
-                logger.debug(f"加载记忆失败（非致命）: {e}")
-
             # system 缓存友好拆分（对齐 chat 模式）：稳定段在前（缓存命中），
-            # 动态段（记忆 + 技能索引）在后，变化不影响稳定前缀。
+            # 动态段（技能索引）在后，变化不影响稳定前缀。记忆快照独立注入。
             messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
             dynamic_content = ""
-            if memory_prompt:
-                dynamic_content += f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
             # 注入技能索引（与 chat 模式一致，渐进式披露：仅 name + description）
             try:
                 from hemlock.core.skill_registry import build_skills_prompt
@@ -1603,6 +1591,14 @@ class AgentOrchestrator:
             if dynamic_content:
                 messages.append({"role": "system", "content": dynamic_content})
             messages.append({"role": "user", "content": f"任务目标: {goal}\n目标 URL: {target_url}\n请开始安全测试。先进行信息收集，再根据发现选择合适的测试策略。"})
+
+        # 记忆快照：独立 system 消息（对话开始时固化，期间不可变，中途 save_memory 不回流）
+        try:
+            snapshot_generated = _inject_memory_snapshot(messages, self.db, self.task)
+            if snapshot_generated:
+                self.db.commit()
+        except Exception as e:
+            logger.debug(f"注入记忆快照失败（非致命）: {e}")
 
         consecutive_errors = 0  # 连续错误计数
         max_consecutive_errors = 3  # 最大连续错误数
@@ -1636,25 +1632,23 @@ class AgentOrchestrator:
                         "content": f"[系统提示] 以下是当前测试进度，请参考决定下一步操作：{context_prompt}{strategy_hint}",
                     })
 
-                    # ===== 上下文管理：动态压缩（AutoCompact）=====
-                    # 每 5 步（注入上下文时）检查并压缩 messages
+                    # ===== 分界线机制：追加区超预算才推进压缩分界线 =====
+                    # 每 5 步（注入上下文时）检查；有 compaction 时历史固化，
+                    # messages 总 token ≈ 追加区 token，超窗口 50% 才推进。
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    if current_tokens > HOT_BUDGET_TOKENS + 2000:
+                    threshold = int(_get_context_window(self.db, self.provider_id) * 0.5)
+                    if current_tokens > threshold:
                         before_tokens = current_tokens
-                        # LLM 驱动摘要压缩，失败自动回退确定性压缩
-                        messages, _ctype = await _auto_compact_messages(
-                            messages,
-                            db=self.db,
-                            provider_id=self.provider_id,
-                            key=f"task_{self.task.id}",
-                            keep_recent=10,
-                            pentest_context=self.context,
+                        # 推进分界线：压缩追加区 → 固化 compaction → 追加区归零
+                        messages, _ctype = await _advance_compaction_boundary(
+                            self.db, self.task, self.steps, messages, self.context,
+                            self.provider_id, threshold=threshold, mode="run",
                         )
                         if _ctype != "none":
                             after_tokens = TokenEstimator.estimate_messages(messages)
                             if before_tokens > after_tokens:
                                 logger.info(
-                                    f"自主模式自动压缩({_ctype}): {before_tokens} → {after_tokens} tokens "
+                                    f"自主模式分界线推进({_ctype}): {before_tokens} → {after_tokens} tokens "
                                     f"(节省 {before_tokens - after_tokens}, step={step_num})"
                                 )
 
@@ -4463,6 +4457,86 @@ async def _auto_compact_messages(
         return asm.compress_messages(messages), "deterministic"
 
 
+async def _advance_compaction_boundary(
+    db: Session | None,
+    task: Task,
+    steps: list[dict],
+    messages: list[dict],
+    pentest_context: Any,
+    provider_id: str | None = None,
+    threshold: int = 0,
+    mode: str = "chat",
+) -> tuple[list[dict], str]:
+    """推进分界线：把追加区压缩固化为 compaction 步骤（分界线机制核心）。
+
+    分界线语义：
+    - 历史 compaction 已固化到 task.steps，恢复时线性展开、不重算
+    - 追加区（最后一个 compaction 之后的对话）原文保留 → 前缀稳定命中缓存
+    - 仅当追加区超预算（threshold = context_window × 50%）才推进分界线：
+      压缩追加区 → 固化为新 compaction 步骤 → 追加区归零重新积累
+
+    压缩复用 _auto_compact_messages 三层（session_memory → LLM → deterministic），
+    压缩后的消息列表原样存进 compaction.data.messages（DB 同时保留原始步骤
+    供前端展示）。恢复时直接展开压缩消息，不再全量重算。
+
+    Returns:
+        (新消息列表, 压缩方式)：'session_memory' / 'llm' / 'deterministic' / 'none'
+    """
+    # 追加区 = 最后一个 compaction 之后的全部步骤
+    last_comp = -1
+    for _i, _st in enumerate(steps):
+        if _st.get("type") == "compaction":
+            last_comp = _i
+    append_steps = steps[last_comp + 1:]
+    if len(append_steps) < 4:
+        return messages, "none"
+
+    # 追加区 → 对话消息（不含 system），过短不值得压缩
+    append_msgs = _linear_restore_steps(append_steps)
+    if len(append_msgs) < 4:
+        return messages, "none"
+    if len(_messages_to_compact_text(append_msgs)) < 800:
+        return messages, "none"
+
+    # AutoCompact 压缩追加区（keep_recent=0：整段进 boundary，固化映射简单）
+    comp_msgs, ctype = await _auto_compact_messages(
+        append_msgs,
+        db=db,
+        provider_id=provider_id,
+        key=f"boundary_{task.id}",
+        keep_recent=0,
+        pentest_context=pentest_context,
+    )
+    if ctype == "none" or not comp_msgs:
+        return messages, "none"
+
+    # 固化：把追加区整体替换为单个 compaction 步骤（压缩消息 + 原始步骤副本）。
+    # 原始步骤存进 original_steps 供前端展示/调试（落库完整），LLM 恢复只用
+    # messages——覆盖步骤物理移除后线性扫描不再重复，历史段逐字节稳定命中缓存。
+    comp_step = {
+        "type": "compaction",
+        "data": {
+            "messages": comp_msgs,
+            "method": ctype,
+            "original_steps": append_steps,
+            "boundary_step_count": len(append_steps),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    steps[last_comp + 1:] = [comp_step]
+    task.steps = json.dumps(steps, ensure_ascii=False, default=str)
+    db.commit()
+
+    logger.info(
+        f"分界线推进({mode}): {ctype} 压缩 {len(append_steps)} 步追加区 → compaction "
+        f"(threshold={threshold}, task={task.id})"
+    )
+
+    # 返回压缩后的完整消息：system 前缀 + 所有 compaction 展开（追加区已归零）
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    return system_msgs + _linear_restore_steps(steps), ctype
+
+
 def _calculate_similarity(s1: str, s2: str) -> float:
     """计算两个字符串的相似度百分比（基于编辑距离）。"""
     if not s1 and not s2:
@@ -4506,6 +4580,32 @@ def _has_llm(db: Session | None = None) -> bool:
         except Exception:
             pass
     return False
+
+
+def _get_context_window(db: Session | None = None, provider_id: str | None = None) -> int:
+    """获取当前 Provider 的上下文窗口（tokens）。
+
+    provider.context_window 优先；为空时按服务商兜底：deepseek 类 1M，
+    其余 128K（多数旧模型的常见窗口）。返回值下限 32K，避免触发阈值过小。
+    """
+    provider = None
+    try:
+        if db:
+            q = db.query(LLMProvider)
+            if provider_id:
+                provider = q.filter(LLMProvider.id == provider_id).first()
+            if provider is None:
+                provider = q.filter(LLMProvider.is_default == True).first()
+            if provider is None:
+                provider = q.first()
+    except Exception:
+        provider = None
+    if provider and provider.context_window:
+        return max(int(provider.context_window), 32768)
+    ptype = (provider.provider or "").lower() if provider else ""
+    if ptype == "deepseek":
+        return 1_000_000
+    return 131072
 
 
 # ===== 原始 HTTP 请求解析 + 编解码辅助函数 =====
@@ -4888,6 +4988,115 @@ def _add_chat_step(db: Session, task: Task, steps: list[dict], step_type: str, d
     db.commit()
 
 
+def _linear_restore_steps(steps: list[dict]) -> list[dict]:
+    """线性展开 steps → 对话消息列表（不含 system）。
+
+    分界线机制核心：遇到 compaction 步骤时直接展开其固化后的压缩消息
+    （data.messages），并跳过 boundary_step_count 个被压缩的普通步骤——
+    历史段逐字节稳定、不再全量重算，前缀缓存持续命中。
+    """
+    messages: list[dict] = []
+    i = 0
+    n = len(steps)
+    while i < n:
+        step = steps[i]
+        stype = step.get("type", "")
+
+        if stype == "user_message":
+            content = step.get("data", "")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            messages.append({"role": "user", "content": content})
+            i += 1
+
+        elif stype == "assistant_message":
+            content = step.get("data", "") or ""
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            # 检查是否紧随 tool_call 组（同一个 assistant 回合）
+            if i + 1 < n and steps[i + 1].get("type") == "tool_call":
+                i += 1
+                group: list[dict] = []
+                while i < n and steps[i].get("type") == "tool_call":
+                    group.append(_parse_step_data(steps[i].get("data", {})))
+                    i += 1
+                _append_tool_group(messages, group, assistant_content=content)
+            else:
+                messages.append({"role": "assistant", "content": content})
+                i += 1
+
+        elif stype == "tool_call":
+            # 没有前置 assistant_message 的 tool_call 组（assistant 无文本内容）
+            group = []
+            while i < n and steps[i].get("type") == "tool_call":
+                group.append(_parse_step_data(steps[i].get("data", {})))
+                i += 1
+            _append_tool_group(messages, group, assistant_content="")
+
+        elif stype == "compaction":
+            # 分界线：展开固化后的压缩消息（覆盖的原始步骤已在推进时替换删除，
+            # 原始步骤存于 original_steps 副本仅供前端展示/调试，LLM 恢复只用 messages）
+            data = _parse_step_data(step.get("data", {}))
+            if not isinstance(data, dict):
+                data = {}
+            comp_msgs = data.get("messages")
+            if isinstance(comp_msgs, list) and comp_msgs:
+                for _cm in comp_msgs:
+                    if isinstance(_cm, dict):
+                        messages.append(_cm)
+            else:
+                # 兼容旧格式：仅存 summary 文本
+                summary = data.get("summary", "")
+                if summary:
+                    messages.append({"role": "user", "content": summary})
+            i += 1
+
+        else:
+            # system_message / thinking / error / complete / subagent_* 等：跳过
+            i += 1
+
+    return messages
+
+
+def _inject_memory_snapshot(messages: list[dict], db: Session | None, task: Task) -> bool:
+    """注入对话级记忆快照（独立 system 消息，动态段之后、对话历史之前）。
+
+    快照 = 对话开始时固化的记忆索引（分级过滤：仅 global + 当前 project）。
+    惰性生成：task.memory_snapshot 为空时首次生成并存库，之后每轮复用存储值，
+    中途 save_memory 不回流 → 快照消息逐字节稳定、可被前缀缓存命中。
+
+    Returns:
+        True 表示本次惰性生成了新快照（调用方应 commit 持久化）。
+    """
+    snapshot = task.memory_snapshot or ""
+    generated = False
+    if not snapshot and db:
+        try:
+            from hemlock.core.memory_manager import build_memory_snapshot
+            snapshot = build_memory_snapshot(db, task.project_id)
+            if snapshot:
+                task.memory_snapshot = snapshot
+                generated = True
+        except Exception as e:
+            logger.debug(f"生成记忆快照失败（非致命）: {e}")
+            return False
+    if not snapshot:
+        return False
+
+    # 查重：checkpoint 恢复时 messages 可能已含上次注入的快照，避免重复插入
+    for _m in messages:
+        if _m.get("role") == "system" and _m.get("content") == snapshot:
+            return generated
+
+    # 插入位置：所有 system 消息（稳定段 + 动态段）之后、对话历史之前
+    insert_at = len(messages)
+    for _i, _m in enumerate(messages):
+        if _m.get("role") == "system":
+            insert_at = _i + 1
+    messages.insert(insert_at, {"role": "system", "content": snapshot})
+    return generated
+
+
 def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = None, system_prompt_override: str | None = None, pentest_context: PentestContext | None = None) -> list[dict]:
     """从 task.steps 恢复 LLM 对话历史（messages 格式），并执行上下文压缩。
 
@@ -4926,13 +5135,18 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
         except Exception:
             pass
 
-        # 动态注入已连接的 MCP 工具列表
+        # 动态注入已连接的 MCP 工具列表（按名字确定性排序：配置不变时
+        # 动态段逐字节稳定，缓存前缀可命中；具体工具定义走 build_agent_tools，
+        # 不进 system——技能/MCP 只向 system 注入索引，正文按需经工具加载）
         try:
             from hemlock.core.mcp_manager import mcp_manager
             mcp_tools = mcp_manager.get_enabled_tools(db)
             if mcp_tools:
                 mcp_info = "\n\n## 可用 MCP 工具\n以下 MCP 服务器工具已连接，可直接调用：\n"
-                for t in mcp_tools:
+                for t in sorted(
+                    mcp_tools,
+                    key=lambda x: (x.get("function", {}).get("name", "") or ""),
+                ):
                     fn = t.get("function", {})
                     mcp_info += f"- **{fn.get('name', '?')}**: {fn.get('description', '')}\n"
                 dynamic_content += mcp_info
@@ -4941,68 +5155,32 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
     if dynamic_content:
         messages.append({"role": "system", "content": dynamic_content})
 
-    i = 0
-    n = len(steps)
-    while i < n:
-        step = steps[i]
-        stype = step.get("type", "")
+    # ===== 分界线机制：线性展开（历史 compaction 固化，不重算）=====
+    # 遇到 compaction 步骤直接展开其压缩结果，历史段逐字节稳定 → 前缀缓存命中。
+    messages.extend(_linear_restore_steps(steps))
 
-        if stype == "user_message":
-            content = step.get("data", "")
-            if not isinstance(content, str):
-                content = json.dumps(content, ensure_ascii=False, default=str)
-            messages.append({"role": "user", "content": content})
-            i += 1
-
-        elif stype == "assistant_message":
-            content = step.get("data", "") or ""
-            if not isinstance(content, str):
-                content = json.dumps(content, ensure_ascii=False, default=str)
-            # 检查是否紧随 tool_call 组（同一个 assistant 回合）
-            if i + 1 < n and steps[i + 1].get("type") == "tool_call":
-                i += 1
-                group: list[dict] = []
-                while i < n and steps[i].get("type") == "tool_call":
-                    group.append(_parse_step_data(steps[i].get("data", {})))
-                    i += 1
-                _append_tool_group(messages, group, assistant_content=content)
-            else:
-                messages.append({"role": "assistant", "content": content})
-                i += 1
-
-        elif stype == "tool_call":
-            # 没有前置 assistant_message 的 tool_call 组（assistant 无文本内容）
-            group = []
-            while i < n and steps[i].get("type") == "tool_call":
-                group.append(_parse_step_data(steps[i].get("data", {})))
-                i += 1
-            _append_tool_group(messages, group, assistant_content="")
-
-        else:
-            # system_message / thinking / error / complete 等：跳过
-            i += 1
-
-    # ===== 上下文管理：三级记忆压缩 =====
-    # 如果没有传入 pentest_context，尝试从全局注册表获取
-    if pentest_context is None:
-        pentest_context = get_context(task.id)
-
-    # 只有当对话消息较多时才启用压缩（避免短对话的额外开销）
-    conv_msg_count = sum(1 for m in messages if m.get("role") != "system")
-    if conv_msg_count > 6:
-        assembler = ContextAssembler()
-        original_tokens = TokenEstimator.estimate_messages(messages)
-        messages = assembler.assemble(
-            system_prompt=messages[0].get("content", "") if messages else "",
-            messages=messages,
-            pentest_context=pentest_context,
-        )
-        compressed_tokens = TokenEstimator.estimate_messages(messages)
-        if original_tokens > compressed_tokens:
-            logger.info(
-                f"上下文压缩: {original_tokens} → {compressed_tokens} tokens "
-                f"(节省 {original_tokens - compressed_tokens}, {conv_msg_count} 条对话消息)"
+    # 上下文压缩兜底：仅当 steps 中没有 compaction（首次累积期 / 旧对话）时，
+    # 用 ContextAssembler 全量重算防膨胀；已有 compaction 时历史已固化，
+    # 追加区超预算由 _advance_compaction_boundary 推进分界线，这里不再重算。
+    has_compaction = any(step.get("type") == "compaction" for step in steps)
+    if not has_compaction:
+        if pentest_context is None:
+            pentest_context = get_context(task.id)
+        conv_msg_count = sum(1 for m in messages if m.get("role") != "system")
+        if conv_msg_count > 6:
+            assembler = ContextAssembler()
+            original_tokens = TokenEstimator.estimate_messages(messages)
+            messages = assembler.assemble(
+                system_prompt=messages[0].get("content", "") if messages else "",
+                messages=messages,
+                pentest_context=pentest_context,
             )
+            compressed_tokens = TokenEstimator.estimate_messages(messages)
+            if original_tokens > compressed_tokens:
+                logger.info(
+                    f"上下文压缩: {original_tokens} → {compressed_tokens} tokens "
+                    f"(节省 {original_tokens - compressed_tokens}, {conv_msg_count} 条对话消息)"
+                )
 
     return messages
 
@@ -5298,28 +5476,18 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
     steps: list[dict] = json.loads(task.steps or "[]")
     messages = _build_chat_messages(steps, task, db, system_prompt_override, pentest_context=context)
 
-    # 1.5 加载长期记忆
-    # 注意：记忆属于动态内容，追加到动态段（缓存断点之后），
-    # 不能追加到 messages[0]（稳定段）——否则记忆变化会让整个 system 前缀缓存作废。
+    # 1.5 注入记忆快照（独立 system 消息：对话开始时固化，期间不可变）
+    # 注意：快照是独立消息放在动态段之后、对话历史之前——
+    # 不追加进动态段（避免每轮记忆变化让动态段前缀缓存作废），
+    # 快照自身惰性生成一次、中途 save_memory 不回流，逐字节稳定可被缓存命中。
     try:
-        from hemlock.core.memory_manager import build_memories_prompt
-        memory_prompt = build_memories_prompt(db)
-        if memory_prompt:
-            mem_block = f"\n\n## 长期记忆\n以下是跨会话保留的经验，请参考应用于当前任务：\n{memory_prompt}"
-            # 找动态段：第一条之后的 system 消息（拆分结构 [稳定, 动态]）
-            dyn_idx = None
-            for _i, _m in enumerate(messages):
-                if _i > 0 and _m.get("role") == "system":
-                    dyn_idx = _i
-                    break
-            if dyn_idx is not None:
-                messages[dyn_idx]["content"] += mem_block
-            else:
-                # 没有动态段（无技能/MCP 时），插入新的 system 消息作为动态段
-                messages.insert(1, {"role": "system", "content": mem_block})
-            logger.info("对话模式加载长期记忆")
+        snapshot_generated = _inject_memory_snapshot(messages, db, task)
+        if snapshot_generated:
+            db.commit()
+        elif task.memory_snapshot:
+            logger.info("对话模式注入记忆快照")
     except Exception as e:
-        logger.debug(f"加载记忆失败（非致命）: {e}")
+        logger.debug(f"注入记忆快照失败（非致命）: {e}")
 
     # 2. 追加用户消息
     messages.append({"role": "user", "content": user_message})
@@ -5643,26 +5811,25 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
                 "result": tool_result,
             })
 
-        # ===== 上下文管理：动态压缩（AutoCompact）=====
-        # 每 10 次工具调用后检查 messages 大小，超预算时压缩
+        # ===== 分界线机制：追加区超预算才推进压缩分界线 =====
+        # 有 compaction 步骤时历史段已固化（恢复线性展开、不重算，前缀稳定命中缓存）；
+        # messages 总 token ≈ 追加区 token（历史只剩小摘要），超窗口 50% 才推进。
         if total_tool_calls > 0 and total_tool_calls % 10 == 0:
+            context_window = _get_context_window(db, provider_id)
+            threshold = int(context_window * 0.5)
             current_tokens = TokenEstimator.estimate_messages(messages)
-            if current_tokens > HOT_BUDGET_TOKENS + 2000:
+            if current_tokens > threshold:
                 before_tokens = current_tokens
-                # LLM 驱动摘要压缩，失败自动回退确定性压缩
-                messages, _ctype = await _auto_compact_messages(
-                    messages,
-                    db=db,
-                    provider_id=provider_id,
-                    key=f"chat_{task_id}",
-                    keep_recent=10,
-                    pentest_context=context,
+                # 推进分界线：压缩追加区 → 固化 compaction → 追加区归零重新积累
+                messages, _ctype = await _advance_compaction_boundary(
+                    db, task, steps, messages, context, provider_id,
+                    threshold=threshold, mode="chat",
                 )
                 if _ctype != "none":
                     after_tokens = TokenEstimator.estimate_messages(messages)
                     if before_tokens > after_tokens:
                         logger.info(
-                            f"对话循环自动压缩({_ctype}): {before_tokens} → {after_tokens} tokens "
+                            f"对话循环分界线推进({_ctype}): {before_tokens} → {after_tokens} tokens "
                             f"(节省 {before_tokens - after_tokens}, tool_calls={total_tool_calls})"
                         )
 

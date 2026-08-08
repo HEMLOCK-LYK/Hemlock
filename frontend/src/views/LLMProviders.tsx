@@ -29,6 +29,7 @@ interface FormState {
   api_key: string;
   base_url: string;
   model: string;
+  context_window: string;
   is_default: boolean;
 }
 
@@ -38,6 +39,7 @@ const emptyForm: FormState = {
   api_key: "",
   base_url: "",
   model: "",
+  context_window: "",
   is_default: false,
 };
 
@@ -91,6 +93,7 @@ export function LLMProviders() {
       api_key: "",
       base_url: p.base_url,
       model: p.model,
+      context_window: p.context_window ? String(p.context_window) : "",
       is_default: p.is_default,
     });
     setEditingId(p.id);
@@ -104,6 +107,9 @@ export function LLMProviders() {
     }
     setSaving(true);
     try {
+      const contextWindow = form.context_window.trim()
+        ? Number(form.context_window)
+        : undefined;
       if (editingId) {
         await llmProvidersApi.update(editingId, {
           name: form.name,
@@ -111,6 +117,7 @@ export function LLMProviders() {
           api_key: form.api_key || undefined,
           base_url: form.base_url,
           model: form.model,
+          context_window: contextWindow,
           is_default: form.is_default,
         });
         showToast("success", "更新成功");
@@ -121,6 +128,7 @@ export function LLMProviders() {
           api_key: form.api_key,
           base_url: form.base_url,
           model: form.model,
+          context_window: contextWindow,
           is_default: form.is_default,
         };
         await llmProvidersApi.create(payload);
@@ -399,6 +407,21 @@ export function LLMProviders() {
                   onChange={(e) => setForm({ ...form, model: e.target.value })}
                   placeholder="请填写模型名称"
                 />
+              </div>
+
+              {/* 上下文窗口 */}
+              <div>
+                <label style={labelStyle}>上下文窗口（tokens）</label>
+                <input
+                  style={inputStyle}
+                  value={form.context_window}
+                  onChange={(e) => setForm({ ...form, context_window: e.target.value })}
+                  placeholder="如：1000000（1M）、131072（128K），留空则使用默认值"
+                />
+                <span className="text-muted" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                  当前主流大模型普遍为 1M（100 万），旧模型可能是 128K。此值决定 Agent
+                  自动压缩触发时机（窗口的 50%）：越大对话保留原文越久、缓存命中省得越多，但上下文过大时单轮推理延迟会升高。
+                </span>
               </div>
 
               {/* 默认开关 */}

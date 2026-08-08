@@ -5,6 +5,17 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.3] - 2026-08-09
+
+### 新增
+- Provider 上下文窗口配置：API Key 管理页可填写 `context_window`（如 1M / 128K），决定 Agent 自动压缩触发时机（窗口的 50%）；留空按服务商兜底（DeepSeek 类 1M / 其余 128K）
+
+### 优化
+- **上下文压缩分界线机制**：压缩结果固化到任务 steps（compaction 步骤），恢复时线性展开、不再每轮全量重算——修复「热窗口滑动截取导致历史段命中率 0」的根因；平时纯追加保持历史前缀逐字节稳定，命中 DeepSeek 自动前缀缓存；仅当追加区超预算（context_window × 50%）才推进压缩分界线
+- 分界线推进复用 AutoCompact 三层（Session Memory → LLM 摘要 → 确定性删减），失败自动降级；被压缩的原始步骤保留于 compaction 副本（落库完整），前端展示「上下文压缩分界线」摘要
+- 记忆快照 + 分级过滤：对话开始时固化 global + 当前项目记忆为独立 system 快照消息，期间不可变、中途 save_memory 不回流，快照逐字节稳定可命中缓存；跨项目记忆不再串扰当前任务
+- 动态段只注入技能 / MCP 索引（MCP 增加确定性排序），具体定义走工具按需加载、不进 system
+
 ## [0.4.2] - 2026-08-07
 
 ### 优化
