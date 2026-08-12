@@ -163,7 +163,7 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <Shield size={12} />
-          v0.4.3
+          v0.5.0
         </div>
       </div>
 

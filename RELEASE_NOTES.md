@@ -1,14 +1,13 @@
-# Hemlock v0.4.3 Release Notes
+# Hemlock v0.5.0 Release Notes
 
 ## 本版本亮点 / What's New
 
-- **上下文压缩分界线机制（核心）**：压缩结果固化到任务轨迹，恢复时线性展开、不再每轮全量重算——彻底修复「热窗口滑动截取导致历史段缓存命中率 0」的根因。平时纯追加保持历史前缀逐字节稳定，DeepSeek 自动前缀缓存持续命中；仅当追加区超预算（上下文窗口的 50%）才推进压缩分界线，对话越长缓存收益越大
-- **分界线推进挂 AutoCompact LLM 层**：压缩走 Session Memory → LLM 摘要 → 确定性删减三层，失败自动降级，压缩质量更高、不打断对话
-- **记忆快照 + 分级过滤**：对话开始时固化 global + 当前项目记忆为独立快照，期间不可变、中途写入不回流，快照逐字节稳定可命中缓存；项目记忆互不串扰
-- **Provider 上下文窗口可配置**：API Key 管理页填写 context_window（主流大模型普遍 1M），触发时机按你的模型精确控制；留空自动按服务商兜底
-- **数据转发补全**：漏洞管理页、数据详情页一键发送到重放器 / 爆破器 / AI 助手，与流量列表完全一致
-- **中途插话即时识别**：Agent 运行中补充消息不打断当前轮、下一思考边界即被识别，并同步广播给子 Agent
-- **Markdown 完整渲染**：记忆详情、报告查看、收集摘要等 Markdown 内容正确渲染（标题 / 表格 / 代码高亮 / 一键复制）
+- **抓包拦截（核心）**：Burp 风格 Intercept——流量流经代理时暂停，展示原始请求/响应包，编辑后放行（Forward）/ 丢弃（Drop）。「拦截请求」「拦截响应」两层独立开关 + 全局总开关，从此人工改包、卡点调试与 AI 自动渗透同源同流
+- **所见即所得改包**：编辑区显示的就是实际发送的字节；Forward 自动重写 Content-Length、删除 Transfer-Encoding，与 Burp 自动修正一致
+- **拦截超时自动放行**：挂起 300s 无人操作自动放行，流量永不卡死
+- **上下文压缩分界线机制**：压缩结果固化到任务轨迹，恢复时线性展开、不再每轮全量重算——修复「热窗口滑动截取导致历史段缓存命中率 0」的根因，对话越长缓存收益越大
+- **记忆快照 + 分级过滤**：对话开始固化 global + 当前项目记忆为独立快照，快照逐字节稳定可命中缓存；项目记忆互不串扰
+- **Provider 上下文窗口可配置**：API Key 管理页填写 context_window，触发时机按你的模型精确控制；留空自动按服务商兜底
 
 ## 中文说明
 
@@ -16,6 +15,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 核心特性
 
+- **抓包拦截器**：请求/响应双层拦截、所见即所得改包、Forward/Drop、超时自动放行——手动调试与 AI 自动测试无缝衔接
 - **ReAct 自主编排引擎**：43 个内置工具，支持 "帮我测试 https://xxx.com" 式自然语言指令，Agent 按 侦察 → 测试 → 验证 → 报告 四阶段自主执行
 - **工具按需加载**：核心工具始终可用，发现 / 文件类工具通过 `load_tools` 按需启用，降低每次请求的 Token 开销
 - **攻击面发现工具**：`analyze_js` 从 JS 提取接口、`fuzz_paths` 路径字典爆破，指令驱动式深挖攻击面
@@ -31,7 +31,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.4.3_x64-setup.exe`
+1. 下载 `Hemlock_0.5.0_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -52,6 +52,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Key Features
 
+- **Packet Intercept (Burp-style)**: request/response layer interception, WYSIWYG packet editing, Forward/Drop, 300s timeout auto-forward — manual debugging and AI-autonomous testing in one flow
 - **ReAct Autonomous Orchestration Engine**: 43 built-in tools, supports natural language instructions like "test https://xxx.com", Agent executes Recon → Test → Verify → Report four-phase autonomous workflow
 - **On-Demand Tool Loading**: core tools always available, discovery/file tools enabled via `load_tools` to reduce token overhead
 - **Attack Surface Discovery**: `analyze_js` extracts endpoints from JS, `fuzz_paths` brute-forces paths
@@ -66,7 +67,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Installation
 
-1. Download `Hemlock_0.4.3_x64-setup.exe`
+1. Download `Hemlock_0.5.0_x64-setup.exe`
 2. Double-click to install and launch
 3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate

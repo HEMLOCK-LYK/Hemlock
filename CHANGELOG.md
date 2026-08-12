@@ -5,6 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-08-12
+
+### 新增
+- **抓包拦截（Burp 风格 Intercept）**：流量流经代理时按需暂停，展示并编辑原始数据包后放行（Forward）/ 丢弃（Drop）；「拦截请求」「拦截响应」两层可分别开关，全局总开关控制，代理重启不丢失配置
+- 独立「拦截器」视图：开关工具栏 + 实时队列计数 + 所见即所得编辑区，报文排版 / 高亮与重放器、流量详情完全一致
+- 编辑后 Forward 自动修正报文（重写 Content-Length、删除 Transfer-Encoding，与 Burp 行为一致）；拦截挂起超时（默认 300s）自动放行，避免流量永久卡住
+
 ## [0.4.3] - 2026-08-09
 
 ### 新增
