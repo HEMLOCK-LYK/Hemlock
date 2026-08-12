@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # 限速
     rate_limit_per_second: int = 10
 
+    # 拦截器
+    # 被拦 flow 等待人工处理的最长秒数，超时自动放行（不编辑）
+    intercept_timeout: int = 300
+
     # LLM
     llm_provider: str = "deepseek"  # openai / deepseek / claude
     llm_api_key: str = ""

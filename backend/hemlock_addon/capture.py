@@ -42,6 +42,9 @@ class CaptureAddon:
 
     def response(self, flow: http.HTTPFlow) -> None:
         """响应完成后，把完整流量写入数据库。"""
+        # 被拦截器 Drop 的 flow 不入库（响应级 Drop 由拦截 addon 打标记）
+        if flow.metadata.get("hemlock_dropped"):
+            return
         try:
             db: Session = SessionLocal()
             try:

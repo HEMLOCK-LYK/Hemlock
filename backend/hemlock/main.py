@@ -276,6 +276,11 @@ def _register_routers(app: FastAPI) -> None:
     except ImportError as e:
         logger.warning(f"proxy 路由注册失败: {e}")
     try:
+        from hemlock.api.intercept import router as intercept_router
+        routers.append(("/api", intercept_router))
+    except ImportError as e:
+        logger.warning(f"intercept 路由注册失败: {e}")
+    try:
         from hemlock.api.flowtag import router as flowtag_router
         routers.append(("/api", flowtag_router))
     except ImportError as e:

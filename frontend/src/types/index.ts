@@ -385,3 +385,39 @@ export interface ChatResponse {
   tool_calls: ChatToolCall[];
   task_id?: string;
 }
+
+// ===== Intercept =====
+export interface InterceptStatus {
+  enabled: boolean;
+  intercept_requests: boolean;
+  intercept_responses: boolean;
+  pending_count: number;
+  proxy_running: boolean;
+}
+
+export interface InterceptConfig {
+  enabled?: boolean;
+  intercept_requests?: boolean;
+  intercept_responses?: boolean;
+}
+
+export interface InterceptItem {
+  id: string;
+  kind: "request" | "response";
+  method: string;
+  url: string;
+  status: number | null;
+  queued_at: number;
+  raw: string;
+}
+
+export interface InterceptPendingList {
+  total: number;
+  items: InterceptItem[];
+}
+
+export interface InterceptActionResult {
+  ok: boolean;
+  remaining: number;
+  error: string; // "not_found" / "already_resolved" / "proxy_not_running"
+}

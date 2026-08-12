@@ -32,7 +32,7 @@ async def events_ws(websocket: WebSocket):
             pass
 
     # 订阅所有频道
-    for channel in ["flow", "agent", "finding", "intruder"]:
+    for channel in ["flow", "agent", "finding", "intruder", "intercept"]:
         event_bus.subscribe(channel, on_event)
 
     try:
@@ -50,5 +50,5 @@ async def events_ws(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        for channel in ["flow", "agent", "finding", "intruder"]:
+        for channel in ["flow", "agent", "finding", "intruder", "intercept"]:
             event_bus.unsubscribe(channel, on_event)

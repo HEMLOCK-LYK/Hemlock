@@ -19,6 +19,7 @@ import {
   Key,
   Users,
   Radar,
+  CircleStop,
 } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
 import { Spinner } from "./Common";
@@ -33,6 +34,7 @@ const navSections = [
   {
     title: "工具",
     items: [
+      { to: "/intercept", label: "拦截器", icon: CircleStop },
       { to: "/repeater", label: "重放器", icon: Repeat },
       { to: "/intruder", label: "爆破器", icon: Swords },
       { to: "/encoder", label: "编码解码", icon: Binary },

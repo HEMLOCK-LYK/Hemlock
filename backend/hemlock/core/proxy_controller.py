@@ -11,6 +11,7 @@ import time
 from typing import Optional
 
 from hemlock.core.config import settings
+from hemlock.services.intercept_controller import intercept_controller
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ class ProxyController:
                 from mitmproxy import options
                 from mitmproxy.tools.dump import DumpMaster
                 from hemlock_addon.capture import CaptureAddon
+                from hemlock_addon.intercept import InterceptAddon
 
                 # 构建 mitmproxy 选项
                 opts_kwargs = dict(
@@ -135,6 +137,9 @@ class ProxyController:
 
                 opts = options.Options(**opts_kwargs)
                 self._master = DumpMaster(opts)
+                # InterceptAddon 必须先于 CaptureAddon 注册（addon 按注册顺序执行）：
+                # 响应拦截的暂停/编辑需发生在入库之前，Forward 后的编辑才会被写入数据库
+                self._master.addons.add(InterceptAddon())
                 self._master.addons.add(CaptureAddon())
 
                 self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -174,12 +179,16 @@ class ProxyController:
         """在独立线程中运行 mitmproxy 事件循环。"""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        # 记录 proxy loop，供拦截器跨线程投递 Forward/Drop 决定
+        intercept_controller.bind_proxy_loop(loop)
         try:
             loop.run_until_complete(self._master.run())
         except Exception as e:
             logger.error(f"代理运行异常: {e}", exc_info=True)
         finally:
             self._running = False
+            # 代理退出：清理拦截器挂起状态（取消等待中的 flow）
+            intercept_controller.reset()
             # 关闭事件循环以释放 server socket
             # 不关闭 loop 会导致 mitmproxy 的监听端口无法释放
             try:

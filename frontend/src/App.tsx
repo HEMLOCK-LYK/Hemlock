@@ -7,6 +7,7 @@ import { FlowList } from "./views/FlowList";
 import { FlowDetail } from "./views/FlowDetail";
 import { Repeater } from "./views/Repeater";
 import { Intruder } from "./views/Intruder";
+import { Intercept } from "./views/Intercept";
 import { Encoder } from "./views/Encoder";
 import { AgentView } from "./views/AgentView";
 import { AgentConfig } from "./views/AgentConfig";
@@ -81,6 +82,7 @@ export default function App() {
               <Route path="/" element={<Navigate to="/flows" replace />} />
               <Route path="/flows" element={<FlowList />} />
               <Route path="/flows/:flowId" element={<FlowDetail />} />
+              <Route path="/intercept" element={<Intercept />} />
               <Route path="/repeater" element={<Repeater />} />
               <Route path="/intruder" element={<Intruder />} />
               <Route path="/encoder" element={<Encoder />} />
