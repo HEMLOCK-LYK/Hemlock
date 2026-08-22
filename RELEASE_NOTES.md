@@ -1,7 +1,9 @@
-# Hemlock v0.5.0 Release Notes
+# Hemlock v0.5.1 Release Notes
 
 ## 本版本亮点 / What's New
 
+- **修复本地推理模型空回复**：Qwen3 等带思考模式的本地模型跑 AI 安全测试时只输出思考链、无最终回复，以前会显示 "(AI 暂无回复内容)"。现在 Agent 会自动提示模型再输出最终回答或调用工具，兜底为说明性提示
+- **端口占用自动接管**：旧版本没退出就装新版本时，后端启动自动终止占着端口的旧 Hemlock 实例再接管，解决"升级后代理打不开"；只杀 hemlock 相关进程，不误伤无关程序
 - **抓包拦截（核心）**：Burp 风格 Intercept——流量流经代理时暂停，展示原始请求/响应包，编辑后放行（Forward）/ 丢弃（Drop）。「拦截请求」「拦截响应」两层独立开关 + 全局总开关，从此人工改包、卡点调试与 AI 自动渗透同源同流
 - **所见即所得改包**：编辑区显示的就是实际发送的字节；Forward 自动重写 Content-Length、删除 Transfer-Encoding，与 Burp 自动修正一致
 - **拦截超时自动放行**：挂起 300s 无人操作自动放行，流量永不卡死
@@ -31,7 +33,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.5.0_x64-setup.exe`
+1. 下载 `Hemlock_0.5.1_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -67,7 +69,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Installation
 
-1. Download `Hemlock_0.5.0_x64-setup.exe`
+1. Download `Hemlock_0.5.1_x64-setup.exe`
 2. Double-click to install and launch
 3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate

@@ -4960,6 +4960,9 @@ MAX_CHAT_TOOL_CALLS = 200
 # 对话模式单次 LLM 调用看门狗（秒）：防止 LLM 挂起/超长导致"无法停止"
 # 超时后该轮结束并返回错误提示（线程在后台结束，任务可继续/停止）
 _CHAT_LLM_WATCHDOG = 180
+# 推理模型（如本地 Qwen3 思考模式）"只输出思考、无最终内容/工具调用"的最大纠错次数。
+# 达到上限后不再死循环，改用兜底回复结束本轮。
+MAX_REASONING_ONLY_RETRY = 1
 
 
 def _parse_step_data(data: Any) -> Any:
@@ -5510,6 +5513,7 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
     tool_call_records: list[dict] = []
     total_tool_calls = 0
     tool_calls = None  # 初始化，第一次循环时 result 尚未返回
+    reasoning_only_nudges = 0  # 连续"仅思考无回复"的纠错计数，避免死循环
 
     event_bus.publish("agent", {
         "event": "chat_message",
@@ -5674,7 +5678,21 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
             if pending:
                 _inject_pending(pending)
                 continue
-            reply = content if content else "(AI 暂无回复内容)"
+            # 推理模型（如本地 Qwen3 思考模式）可能只输出 reasoning 而无最终内容/工具调用，
+            # 直接结束会显示 "(AI 暂无回复内容)"。给一次纠错机会让其输出最终回答或调用工具；
+            # 纠错仍失败则用说明性兜底回复，避免空占位（思考流已通过 thinking 事件实时展示）。
+            if not content.strip() and reasoning_content.strip():
+                if reasoning_only_nudges < MAX_REASONING_ONLY_RETRY:
+                    reasoning_only_nudges += 1
+                    messages.append({
+                        "role": "user",
+                        "content": "你上一条回复只包含思考过程，没有输出任何最终内容，也没有调用工具。"
+                                   "请直接输出对用户有用的最终回答，或调用工具继续执行测试。不要只输出思考。",
+                    })
+                    continue
+                reply = "（模型本轮仅输出思考过程，未给出最终回答或调用工具。已展示上方思考内容，请重试或换用非思考模式模型。）"
+            else:
+                reply = content
             messages.append({"role": "assistant", "content": reply})
             _add_chat_step(db, task, steps, "assistant_message", reply)
             task.status = TASK_STATUS_IDLE
