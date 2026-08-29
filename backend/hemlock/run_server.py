@@ -14,6 +14,10 @@ import time
 
 logger = logging.getLogger(__name__)
 
+# Windows: GUI 子进程拉起控制台程序会闪现黑框，统一加 CREATE_NO_WINDOW。
+# 非 Windows 平台传非零 creationflags 会抛 ValueError，置 0 无副作用。
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
 
 def _ensure_stdio():
     """PyInstaller 无控制台模式下 sys.stdout/stderr 可能为 None，需要修复。"""
@@ -31,7 +35,8 @@ def _find_pids_on_ports(ports: set[int]) -> set[int]:
     pids: set[int] = set()
     try:
         out = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=10
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout
     except Exception:
         return pids
@@ -53,6 +58,7 @@ def _process_name(pid: int) -> str:
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10,
+            creationflags=_CREATE_NO_WINDOW,
         ).stdout.strip()
         if not out:
             return ""
@@ -83,6 +89,7 @@ def _takeover_stale_hemlock(ports: list[int]) -> None:
             subprocess.run(
                 ["taskkill", "/F", "/PID", str(pid)],
                 capture_output=True, text=True, timeout=10,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except Exception as e:
             logger.warning(f"终止旧实例失败: {e}")
