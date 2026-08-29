@@ -5,6 +5,21 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.5.2] - 2026-08-30
+
+### 新增
+- **接口协议选择**：API Key 配置支持 OpenAI 兼容（`/v1/chat/completions`）与 Anthropic 原生（`/v1/messages`）双协议——只暴露 Anthropic 原生接口的中转站现在可用；选 Anthropic 服务商自动切换协议，Base URL 带 `/v1` 与否均可自动规整；流式 / 工具调用 / 思考链全适配
+- 重放器新增「跟随重定向」开关：关闭后保留原始 30x 响应（Burp 默认行为），便于排查跳转过程中的认证丢失
+
+### 修复
+- 重放器/重放「莫名 401」：跨域重定向时 httpx 按规范剥离 Authorization/Cookie，之前写死跟随重定向导致看到的是重定向目标返回的 401；现在可通过开关关闭跟随看到真实原因
+- 重放器修改 Host 后流量列表 host 显示异常（如 `baidu.comhttp`）且响应无效：请求行为绝对形式（`GET http://... HTTP/1.1`）时解析出错，拼接出畸形 URL；现在正确识别绝对形式请求行，相对路径强制以 `/` 开头，无 Host 头直接报「无法解析请求」
+- 重放时残留旧 Content-Length：抓包头中的 Content-Length 与用户改过的 body 不一致，部分网关/签名校验会拒绝；现在丢弃旧值、按实际 body 重算
+- 重放请求混入多余默认头（`sec-ch-ua` / `Sec-Fetch-*` / `Upgrade-Insecure-Requests` 等）：报文里写什么头就发什么头（与 Burp 一致），仅在用户未写 UA 时兜底补一个 Chrome UA，避免暴露 python-httpx 指纹
+
+### 优化
+- 重放器与流量列表的请求头展示**完全一致（复制粘贴级）**：包括字段排列顺序——用户报文头按原序展示，自动补充的头（Host / Content-Length / 兜底 UA）统一追加在末尾，三处展示源（重放器 Raw、流量详情、实际发送）顺序一致
+
 ## [0.5.1] - 2026-08-22
 
 ### 修复

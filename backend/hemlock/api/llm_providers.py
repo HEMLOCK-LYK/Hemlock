@@ -26,6 +26,7 @@ class ProviderCreateRequest(BaseModel):
     """创建 Provider 请求。"""
     name: str
     provider: str = "openai"
+    protocol: str = "openai"            # 接口协议：openai（/v1/chat/completions）/ anthropic（/v1/messages）
     api_key: str
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
@@ -37,6 +38,7 @@ class ProviderUpdateRequest(BaseModel):
     """更新 Provider 请求。所有字段可选，仅更新传入字段。"""
     name: str | None = None
     provider: str | None = None
+    protocol: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
@@ -49,6 +51,7 @@ class ProviderResponse(BaseModel):
     id: str
     name: str
     provider: str
+    protocol: str = "openai"
     base_url: str
     model: str
     context_window: int | None = None
@@ -82,6 +85,7 @@ def _to_response(provider: LLMProvider) -> ProviderResponse:
         id=provider.id,
         name=provider.name,
         provider=provider.provider,
+        protocol=getattr(provider, "protocol", None) or "openai",
         base_url=provider.base_url,
         model=provider.model,
         context_window=provider.context_window,
@@ -135,6 +139,7 @@ async def create_provider(req: ProviderCreateRequest, db: Session = Depends(get_
         id=str(uuid.uuid4()),
         name=req.name,
         provider=req.provider,
+        protocol=req.protocol if req.protocol in ("openai", "anthropic") else "openai",
         api_key=req.api_key,
         base_url=req.base_url,
         model=req.model,

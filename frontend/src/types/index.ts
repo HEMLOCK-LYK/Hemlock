@@ -95,6 +95,7 @@ export interface SendRequestRequest {
   headers: string;
   body: string;
   project_id?: string | null;
+  follow_redirects?: boolean;
 }
 
 export interface SendRequestResponse {
@@ -188,6 +189,7 @@ export interface RepeaterTab {
   response: SendRequestResponse | null;
   error: string | null;
   respMode: "split" | "raw";
+  followRedirects?: boolean; // undefined 视为 true（跟随重定向）
 }
 
 export interface IntruderTab {

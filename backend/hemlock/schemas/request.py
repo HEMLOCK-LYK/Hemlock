@@ -12,6 +12,10 @@ class SendRequestRequest(BaseModel):
     headers: Union[str, dict] = ""
     body: str = ""
     project_id: str | None = None
+    # 是否跟随 3xx 重定向。默认 True；跨域重定向时 httpx 会按规范剥离
+    # Authorization/Cookie，重定向目标返回 401 会让人误以为是认证失败——
+    # 重放器可关闭此项查看原始 30x 响应（Burp 默认不跟随）。
+    follow_redirects: bool = True
 
     @field_validator("headers", mode="before")
     @classmethod

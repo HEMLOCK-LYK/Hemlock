@@ -206,6 +206,7 @@ export function Repeater() {
         headers: parsed.headers,
         body: parsed.body,
         project_id: currentProjectId,
+        follow_redirects: activeTab.followRedirects !== false,
       });
       updateActiveTab({ response: result });
     } catch (e) {
@@ -302,6 +303,23 @@ export function Repeater() {
                 onClick={() => updateActiveTab({ scheme: "https" })}
               >HTTPS</button>
             </div>
+          )}
+          {activeTab && (
+            <button
+              className="btn btn-sm"
+              style={{
+                fontSize: 11,
+                padding: "2px 10px",
+                background: activeTab.followRedirects !== false ? "var(--accent-blue)" : "var(--bg-tertiary)",
+                color: activeTab.followRedirects !== false ? "#fff" : "var(--text-secondary)",
+              }}
+              title="开启时自动跟随 3xx 重定向并显示最终响应；关闭时保留原始 30x 响应（跨域重定向会丢失 Authorization/Cookie，导致目标返回 401，关闭后可看到真实跳转过程）"
+              onClick={() =>
+                updateActiveTab({ followRedirects: activeTab.followRedirects === false })
+              }
+            >
+              跟随重定向
+            </button>
           )}
         </div>
       </div>

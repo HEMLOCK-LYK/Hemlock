@@ -6,6 +6,7 @@ export interface LLMProvider {
   id: string;
   name: string;
   provider: string;
+  protocol: string;
   base_url: string;
   model: string;
   context_window: number | null;
@@ -21,6 +22,7 @@ export interface ProviderListResponse {
 export interface ProviderCreateRequest {
   name: string;
   provider: string;
+  protocol?: string;
   api_key: string;
   base_url: string;
   model: string;
@@ -31,12 +33,19 @@ export interface ProviderCreateRequest {
 export interface ProviderUpdateRequest {
   name?: string;
   provider?: string;
+  protocol?: string;
   api_key?: string;
   base_url?: string;
   model?: string;
   context_window?: number | null;
   is_default?: boolean;
 }
+
+// 接口协议：OpenAI 兼容（/v1/chat/completions）或 Anthropic 原生（/v1/messages）
+export const PROTOCOL_OPTIONS: { value: string; label: string }[] = [
+  { value: "openai", label: "OpenAI 兼容（/v1/chat/completions）" },
+  { value: "anthropic", label: "Anthropic 原生（/v1/messages）" },
+];
 
 // ===== API =====
 

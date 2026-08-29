@@ -42,7 +42,7 @@ export function parseRawRequest(
   const reqParts = requestLine.trim().split(/\s+/);
   if (reqParts.length < 2) return null;
   const method = reqParts[0];
-  const path = reqParts[1];
+  let target = reqParts[1];
 
   // 解析头部
   const headerLines = lines.slice(1);
@@ -55,7 +55,20 @@ export function parseRawRequest(
     }
   }
 
-  const url = `${scheme}://${host}${path}`;
+  // 绝对形式请求行（GET http://host/path HTTP/1.1，代理抓包常见）：
+  // 直接用完整 URL 作为请求目标，scheme 以请求行为准。
+  // 否则按 origin-form 拼 scheme://host+path——path 必须以 / 开头，
+  // 否则会拼出 https://hosthttp://... 这类畸形 URL（曾导致流量列表 host 显示 "xx.comhttp"）。
+  let url: string;
+  if (/^https?:\/\//i.test(target)) {
+    url = target;
+    scheme = target.toLowerCase().startsWith("https://") ? "https" : "http";
+  } else {
+    if (!host) return null;
+    if (target && !target.startsWith("/")) target = "/" + target;
+    url = `${scheme}://${host}${target || "/"}`;
+  }
+
   const headers = headerLines.join("\n").trim();
 
   return { method, url, headers, body, scheme };
@@ -64,7 +77,9 @@ export function parseRawRequest(
 /**
  * 从 {method, url, headers, body} 构建原始请求文本。
  *
- * 如果 headers 中没有 Host，自动从 URL 提取并添加。
+ * 如果 headers 中没有 Host，自动从 URL 提取并追加到末尾——
+ * 与后端入库顺序（用户头按原序 + 自动头追加尾部）一致，
+ * 保证重放器 Raw 与流量列表详情的头顺序「像复制粘贴一样」。
  */
 export function buildRawRequest(
   method: string,
@@ -80,12 +95,12 @@ export function buildRawRequest(
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
 
-    // 检查是否已有 Host
+    // 检查是否已有 Host（缺失时追加到末尾，不插到最前）
     const hasHost = headerLines.some((l) =>
       l.toLowerCase().startsWith("host:")
     );
     if (!hasHost) {
-      headerLines.unshift(`Host: ${u.host}`);
+      headerLines.push(`Host: ${u.host}`);
     }
 
     const headerStr = headerLines.join("\n");

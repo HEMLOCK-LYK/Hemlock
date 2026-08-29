@@ -7,10 +7,13 @@
 - Token 用量追踪：记录消耗，辅助成本控制
 """
 
+import json
 import logging
 import time
+import uuid
 from typing import Any, Callable, TYPE_CHECKING
 
+import httpx
 from openai import (
     OpenAI,
     APIError,
@@ -216,18 +219,492 @@ def _apply_cache_control(messages: list[dict], model: str | None) -> list[dict]:
     return result
 
 
-def _retry_api_call(fn: Any, operation: str = "LLM API") -> Any:
+# ===== Anthropic 原生协议（/v1/messages）适配 =====
+#
+# 部分中转站只暴露 Anthropic 原生接口（/v1/messages），不提供 OpenAI 兼容层。
+# Provider 的 protocol 字段为 "anthropic" 时，走本节适配：内部消息仍是 OpenAI
+# 格式（agent 全链路不变），在边界处转换为 Anthropic 格式并解析回 OpenAI 格式。
+
+_ANTHROPIC_VERSION = "2023-06-01"
+_ANTHROPIC_MAX_TOKENS = 8192  # Anthropic Messages API 必填的输出上限
+
+# 共享连接池（无认证头，鉴权按请求携带，避免 Provider 更新后连接池残留旧 key）
+_anthropic_http = httpx.Client(timeout=_REQUEST_TIMEOUT)
+
+
+class _AnthropicError(Exception):
+    """Anthropic 接口 4xx 错误（不可重试）。"""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(f"HTTP {status_code}: {message}")
+        self.status_code = status_code
+
+
+class _AnthropicRetryableError(_AnthropicError):
+    """Anthropic 接口 429/5xx 错误（可重试）。"""
+
+
+def _normalize_anthropic_base(base_url: str) -> str:
+    """规整 Anthropic Base URL：去尾斜杠与 /v1 后缀，拼路径时统一补 /v1/messages。
+
+    用户可能填 https://relay.com、https://relay.com/ 或 https://relay.com/v1，
+    三者最终都请求 https://relay.com/v1/messages。
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base
+
+
+def _resolve_protocol(provider_id: str | None, db: "Session | None") -> str:
+    """解析 Provider 的接口协议（openai / anthropic）。无 Provider 时默认 openai。"""
+    if db is None:
+        return "openai"
+    from hemlock.models.llm_provider import LLMProvider
+    if provider_id is not None:
+        p = db.query(LLMProvider).filter(LLMProvider.id == provider_id).first()
+    else:
+        p = db.query(LLMProvider).filter(LLMProvider.is_default == True).first()
+    if p is None:
+        return "openai"
+    return getattr(p, "protocol", None) or "openai"
+
+
+def _resolve_anthropic_config(
+    provider_id: str | None,
+    db: "Session | None",
+    model: str | None,
+) -> dict[str, str]:
+    """解析 Anthropic 协议请求所需的 base_url / api_key / model。
+
+    优先级同 OpenAI 路径：Provider 配置 > settings 兜底；显式 model 参数最高。
+    """
+    base_url = settings.llm_base_url
+    api_key = settings.llm_api_key or ""
+    use_model = model
+
+    if db is not None:
+        from hemlock.models.llm_provider import LLMProvider
+        if provider_id is not None:
+            p = db.query(LLMProvider).filter(LLMProvider.id == provider_id).first()
+        else:
+            p = db.query(LLMProvider).filter(LLMProvider.is_default == True).first()
+        if p:
+            base_url = p.base_url or base_url
+            api_key = p.api_key
+            if use_model is None:
+                use_model = p.model
+
+    if use_model is None:
+        use_model = settings.llm_model
+
+    return {"base_url": base_url, "api_key": api_key, "model": use_model or ""}
+
+
+def _openai_tools_to_anthropic(tools: list[dict]) -> list[dict]:
+    """OpenAI tools 格式 -> Anthropic tools 格式。
+
+    OpenAI:  {"type": "function", "function": {"name", "description", "parameters"}}
+    Anthropic: {"name", "description", "input_schema"}
+    """
+    result = []
+    for t in tools:
+        fn = t.get("function", {}) if isinstance(t, dict) else {}
+        result.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+        })
+    return result
+
+
+def _anthropic_system_blocks(system_text: str) -> str | list[dict]:
+    """构造 system 参数。开启 cache_control 时用内容块格式打缓存标记。"""
+    if not getattr(settings, "llm_cache_control_enabled", False):
+        return system_text
+    return [{
+        "type": "text",
+        "text": system_text,
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
+def _messages_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
+    """OpenAI 消息序列 -> (system 文本, Anthropic messages)。
+
+    转换规则：
+    - system -> system 参数（多条合并）
+    - assistant.tool_calls -> tool_use 内容块（arguments JSON 字符串解析回对象）
+    - role=tool -> user 消息中的 tool_result 块
+    - 相邻同角色消息合并（Anthropic 要求 user/assistant 交替）
+    """
+    system_parts: list[str] = []
+    out: list[dict] = []
+
+    def _append(role: str, content) -> None:
+        # 合并相邻同角色消息
+        if out and out[-1]["role"] == role:
+            prev = out[-1]["content"]
+            if isinstance(prev, list) and isinstance(content, list):
+                prev.extend(content)
+            elif isinstance(prev, list):
+                prev.append({"type": "text", "text": str(content)})
+            elif isinstance(content, list):
+                out[-1]["content"] = [{"type": "text", "text": prev}, *content]
+            else:
+                out[-1]["content"] = f"{prev}\n{content}"
+        else:
+            out.append({"role": role, "content": content})
+
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+
+        if role == "system":
+            if isinstance(content, list):
+                # cache_control 注入后的块格式
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        system_parts.append(blk.get("text", ""))
+            elif content:
+                system_parts.append(content)
+
+        elif role == "tool":
+            _append("user", [{
+                "type": "tool_result",
+                "tool_use_id": m.get("tool_call_id", ""),
+                "content": content if isinstance(content, str) else json.dumps(content, ensure_ascii=False),
+            }])
+
+        elif role == "assistant":
+            blocks: list[dict] = []
+            if content:
+                blocks.append({"type": "text", "text": content})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                raw_args = fn.get("arguments") or "{}"
+                try:
+                    input_obj = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    input_obj = {"_raw": str(raw_args)}
+                blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:16]}",
+                    "name": fn.get("name", ""),
+                    "input": input_obj,
+                })
+            if blocks:
+                _append("assistant", blocks)
+
+        else:  # user
+            if isinstance(content, list):
+                texts = [
+                    blk.get("text", "") if isinstance(blk, dict) else str(blk)
+                    for blk in content
+                ]
+                content = "\n".join(t for t in texts if t)
+            if content:
+                _append("user", content)
+
+    # Anthropic 要求首条消息为 user
+    if not out or out[0]["role"] != "user":
+        out.insert(0, {"role": "user", "content": "（继续）"})
+
+    return "\n".join(system_parts), out
+
+
+def _anthropic_request(config: dict[str, str], body: dict) -> dict:
+    """发送 Anthropic Messages API 请求，返回 JSON 响应。
+
+    429/5xx 抛 _AnthropicRetryableError（可重试），其余 4xx 抛 _AnthropicError。
+    """
+    url = _normalize_anthropic_base(config["base_url"]) + "/v1/messages"
+    headers = {
+        "x-api-key": config["api_key"],
+        "anthropic-version": _ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    try:
+        resp = _anthropic_http.post(url, json=body, headers=headers)
+    except httpx.TimeoutException as e:
+        raise APITimeoutError(e)  # 复用超时重试与错误信息
+    except httpx.TransportError as e:
+        raise APIConnectionError(e)
+
+    if resp.status_code >= 400:
+        try:
+            err_detail = resp.json().get("error", {}).get("message", resp.text)
+        except Exception:
+            err_detail = resp.text
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise _AnthropicRetryableError(resp.status_code, err_detail)
+        raise _AnthropicError(resp.status_code, err_detail)
+
+    return resp.json()
+
+
+def _track_usage_anthropic(usage: dict | None) -> None:
+    """追踪 Anthropic 格式的 Token 用量。"""
+    if not usage:
+        return
+    try:
+        _token_usage["prompt_tokens"] += usage.get("input_tokens", 0) or 0
+        _token_usage["completion_tokens"] += usage.get("output_tokens", 0) or 0
+        _token_usage["total_tokens"] += (
+            (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0)
+        )
+        _token_usage["request_count"] += 1
+    except Exception:
+        pass
+
+
+def _anthropic_parse_response(data: dict) -> dict[str, Any]:
+    """Anthropic 响应 -> OpenAI 风格返回值（content / tool_calls / reasoning_content）。"""
+    content_parts: list[str] = []
+    reasoning = ""
+    tool_calls: list[dict] = []
+
+    for blk in data.get("content", []):
+        btype = blk.get("type")
+        if btype == "text":
+            content_parts.append(blk.get("text", ""))
+        elif btype == "thinking":
+            reasoning += blk.get("thinking", "")
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": blk.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": blk.get("name", ""),
+                    "arguments": json.dumps(blk.get("input", {}), ensure_ascii=False),
+                },
+            })
+
+    _track_usage_anthropic(data.get("usage"))
+
+    return {
+        "content": "".join(content_parts),
+        "tool_calls": tool_calls or None,
+        "reasoning_content": reasoning,
+    }
+
+
+def _anthropic_chat(
+    config: dict[str, str],
+    messages: list[dict],
+    tools: list[dict] | None,
+    temperature: float,
+) -> dict[str, Any]:
+    """Anthropic 协议非流式对话。返回结构与 chat() 一致。"""
+    system, msgs = _messages_to_anthropic(messages)
+    body: dict[str, Any] = {
+        "model": config["model"],
+        "max_tokens": _ANTHROPIC_MAX_TOKENS,
+        "messages": msgs,
+        "temperature": temperature,
+    }
+    if system:
+        body["system"] = _anthropic_system_blocks(system)
+    if tools:
+        body["tools"] = _openai_tools_to_anthropic(tools)
+
+    resp = _retry_api_call(
+        lambda: _anthropic_request(config, body), "chat(anthropic)", _ANTHROPIC_RETRYABLE
+    )
+    return _anthropic_parse_response(resp)
+
+
+def _anthropic_chat_json(
+    config: dict[str, str],
+    messages: list[dict],
+    temperature: float,
+) -> str:
+    """Anthropic 协议 JSON 对话。Anthropic 无 response_format，用 system 提示约束。"""
+    msgs = [{"role": "system", "content": "只输出合法 JSON，不要输出任何其他内容。"}, *messages]
+    result = _anthropic_chat(config, msgs, None, temperature)
+    return result["content"] or "{}"
+
+
+def _anthropic_stream(
+    config: dict[str, str],
+    messages: list[dict],
+    tools: list[dict] | None,
+    temperature: float,
+    on_reasoning: "Callable[[str], None] | None" = None,
+    on_content: "Callable[[str], None] | None" = None,
+    should_stop: "Callable[[], bool] | None" = None,
+) -> dict[str, Any]:
+    """Anthropic 协议流式对话（SSE）。返回结构与 chat_stream() 一致。"""
+    system, msgs = _messages_to_anthropic(messages)
+    body: dict[str, Any] = {
+        "model": config["model"],
+        "max_tokens": _ANTHROPIC_MAX_TOKENS,
+        "messages": msgs,
+        "temperature": temperature,
+        "stream": True,
+    }
+    if system:
+        body["system"] = _anthropic_system_blocks(system)
+    if tools:
+        body["tools"] = _openai_tools_to_anthropic(tools)
+
+    url = _normalize_anthropic_base(config["base_url"]) + "/v1/messages"
+    headers = {
+        "x-api-key": config["api_key"],
+        "anthropic-version": _ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+
+    def _call():
+        # httpx.stream 返回惰性上下文管理器，真正发请求在 __enter__ 时——
+        # 因此这里手动 enter 并检查状态码，让连接错误与 429/5xx 落在重试范围内
+        if should_stop is not None and should_stop():
+            raise _StopStream()
+        ctx = _anthropic_http.stream("POST", url, json=body, headers=headers)
+        try:
+            resp = ctx.__enter__()
+            if resp.status_code >= 400:
+                resp.read()
+                try:
+                    err_detail = resp.json().get("error", {}).get("message", resp.text)
+                except Exception:
+                    err_detail = resp.text
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    raise _AnthropicRetryableError(resp.status_code, err_detail)
+                raise _AnthropicError(resp.status_code, err_detail)
+            return ctx, resp
+        except BaseException:
+            ctx.__exit__(type(None), None, None)
+            raise
+
+    try:
+        stream_ctx, resp = _retry_api_call(_call, "chat_stream(anthropic)", _ANTHROPIC_RETRYABLE)
+    except _StopStream:
+        return {"content": "", "tool_calls": None, "reasoning_content": ""}
+
+    full_reasoning = ""
+    full_content = ""
+    # block_index -> {"id", "name", "arguments"}（tool_use 块按 index 累积）
+    tool_blocks: dict[int, dict] = []
+    input_tokens = 0
+    output_tokens = 0
+
+    try:
+        try:
+            for line in resp.iter_lines():
+                # 用户停止：立即中断流式读取
+                if should_stop is not None and should_stop():
+                    break
+                if not line or not line.startswith("data:"):
+                    continue
+                try:
+                    event = json.loads(line[len("data:"):].strip())
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type")
+                if etype == "message_start":
+                    usage = event.get("message", {}).get("usage", {})
+                    input_tokens = usage.get("input_tokens", 0) or 0
+
+                elif etype == "content_block_start":
+                    blk = event.get("content_block", {})
+                    if blk.get("type") == "tool_use":
+                        tool_blocks[event.get("index", 0)] = {
+                            "id": blk.get("id", ""),
+                            "name": blk.get("name", ""),
+                            "arguments": "",
+                        }
+
+                elif etype == "content_block_delta":
+                    delta = event.get("delta", {})
+                    dtype = delta.get("type")
+                    if dtype == "text_delta":
+                        piece = delta.get("text", "")
+                        if piece:
+                            full_content += piece
+                            if on_content:
+                                try:
+                                    on_content(piece)
+                                except Exception:
+                                    pass
+                    elif dtype == "thinking_delta":
+                        piece = delta.get("thinking", "")
+                        if piece:
+                            full_reasoning += piece
+                            if on_reasoning:
+                                try:
+                                    on_reasoning(piece)
+                                except Exception:
+                                    pass
+                    elif dtype == "input_json_delta":
+                        idx = event.get("index", 0)
+                        if idx in tool_blocks:
+                            tool_blocks[idx]["arguments"] += delta.get("partial_json", "")
+
+                elif etype == "message_delta":
+                    usage = event.get("usage", {})
+                    output_tokens = usage.get("output_tokens", 0) or 0
+
+                elif etype == "error":
+                    err = event.get("error", {})
+                    raise _AnthropicError(500, err.get("message", "stream error"))
+        finally:
+            # 关闭流式连接（等价于 with 块退出）
+            stream_ctx.__exit__(type(None), None, None)
+    except httpx.TimeoutException as e:
+        raise APITimeoutError(e)
+    except httpx.TransportError as e:
+        raise APIConnectionError(e)
+
+    _token_usage["prompt_tokens"] += input_tokens
+    _token_usage["completion_tokens"] += output_tokens
+    _token_usage["total_tokens"] += input_tokens + output_tokens
+    _token_usage["request_count"] += 1
+
+    serialized_tool_calls = None
+    if tool_blocks:
+        serialized_tool_calls = [
+            {
+                "id": blk["id"],
+                "type": "function",
+                "function": {
+                    "name": blk["name"],
+                    "arguments": blk["arguments"] or "{}",
+                },
+            }
+            for _, blk in sorted(tool_blocks.items())
+        ]
+
+    return {
+        "content": full_content,
+        "tool_calls": serialized_tool_calls,
+        "reasoning_content": full_reasoning,
+    }
+
+
+_ANTHROPIC_RETRYABLE = (
+    _AnthropicRetryableError,
+    httpx.TimeoutException,
+    httpx.TransportError,
+)
+
+
+def _retry_api_call(fn: Any, operation: str = "LLM API", retryable: tuple = _RETRYABLE_ERRORS) -> Any:
     """带指数退避的重试包装器。
 
     仅对可重试的错误（网络超时、限速、服务端 5xx）进行重试。
     对 4xx 客户端错误（如认证失败、参数错误）直接抛出。
+
+    retryable: 可重试的异常类型元组。OpenAI 路径用默认值（SDK 异常），
+    Anthropic 路径传入自定义异常元组。
     """
     last_error: Exception | None = None
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
             return fn()
-        except _RETRYABLE_ERRORS as e:
+        except retryable as e:
             last_error = e
             if attempt < _MAX_RETRIES:
                 delay = min(_RETRY_BASE_DELAY * (2 ** attempt), _RETRY_MAX_DELAY)
@@ -291,6 +768,11 @@ def chat(
     参数 db 为数据库会话，传入时可从数据库查询 Provider 配置。
     自动重试网络错误和限速，4xx 错误直接抛出。
     """
+    # Anthropic 原生协议（/v1/messages）走独立适配
+    if _resolve_protocol(provider_id, db) == "anthropic":
+        config = _resolve_anthropic_config(provider_id, db, model)
+        return _anthropic_chat(config, messages, tools, temperature)
+
     client, use_model = _resolve_client_and_model(provider_id, db, model)
     messages = _apply_cache_control(messages, use_model)
     kwargs: dict[str, Any] = {
@@ -350,6 +832,11 @@ def chat_json(
     参数 provider_id 可指定使用的 Provider ID，不为 None 时使用该 Provider 的客户端。
     参数 db 为数据库会话，传入时可从数据库查询 Provider 配置。
     """
+    # Anthropic 原生协议（/v1/messages）走独立适配
+    if _resolve_protocol(provider_id, db) == "anthropic":
+        config = _resolve_anthropic_config(provider_id, db, model)
+        return _anthropic_chat_json(config, messages, temperature)
+
     client, use_model = _resolve_client_and_model(provider_id, db, model)
     messages = _apply_cache_control(messages, use_model)
 
@@ -458,6 +945,14 @@ def chat_stream(
     # 发起请求前已请求停止：直接返回空结果（不发起无意义的调用）
     if should_stop is not None and should_stop():
         return {"content": "", "tool_calls": None, "reasoning_content": ""}
+
+    # Anthropic 原生协议（/v1/messages）走独立适配
+    if _resolve_protocol(provider_id, db) == "anthropic":
+        config = _resolve_anthropic_config(provider_id, db, model)
+        return _anthropic_stream(
+            config, messages, tools, temperature,
+            on_reasoning=on_reasoning, on_content=on_content, should_stop=should_stop,
+        )
 
     client, use_model = _resolve_client_and_model(provider_id, db, model)
     messages = _apply_cache_control(messages, use_model)

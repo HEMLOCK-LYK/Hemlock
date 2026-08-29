@@ -99,6 +99,11 @@ def _migrate_add_columns() -> None:
             conn.execute(text("ALTER TABLE llm_providers ADD COLUMN context_window INTEGER"))
             conn.commit()
 
+        # 检查 llm_providers 表是否有 protocol 列（接口协议：openai / anthropic）
+        if "protocol" not in provider_columns:
+            conn.execute(text("ALTER TABLE llm_providers ADD COLUMN protocol VARCHAR(20) DEFAULT 'openai' NOT NULL"))
+            conn.commit()
+
 
 def get_db():
     """FastAPI 依赖：提供数据库会话。"""

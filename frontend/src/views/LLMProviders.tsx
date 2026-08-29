@@ -13,6 +13,7 @@ import {
 import {
   llmProvidersApi,
   PROVIDER_TYPES,
+  PROTOCOL_OPTIONS,
   type LLMProvider,
   type ProviderCreateRequest,
 } from "../api/llmProviders";
@@ -26,6 +27,7 @@ interface ToastState {
 interface FormState {
   name: string;
   provider: string;
+  protocol: string;
   api_key: string;
   base_url: string;
   model: string;
@@ -36,6 +38,7 @@ interface FormState {
 const emptyForm: FormState = {
   name: "",
   provider: "custom",
+  protocol: "openai",
   api_key: "",
   base_url: "",
   model: "",
@@ -77,6 +80,8 @@ export function LLMProviders() {
     setForm((prev) => ({
       ...prev,
       provider: providerKey,
+      // 选 Anthropic 服务商时默认走 Anthropic 原生协议；切回其他服务商恢复 OpenAI 兼容
+      protocol: providerKey === "anthropic" ? "anthropic" : "openai",
     }));
   };
 
@@ -90,6 +95,7 @@ export function LLMProviders() {
     setForm({
       name: p.name,
       provider: p.provider,
+      protocol: p.protocol || "openai",
       api_key: "",
       base_url: p.base_url,
       model: p.model,
@@ -114,6 +120,7 @@ export function LLMProviders() {
         await llmProvidersApi.update(editingId, {
           name: form.name,
           provider: form.provider,
+          protocol: form.protocol,
           api_key: form.api_key || undefined,
           base_url: form.base_url,
           model: form.model,
@@ -125,6 +132,7 @@ export function LLMProviders() {
         const payload: ProviderCreateRequest = {
           name: form.name,
           provider: form.provider,
+          protocol: form.protocol,
           api_key: form.api_key,
           base_url: form.base_url,
           model: form.model,
@@ -279,7 +287,7 @@ export function LLMProviders() {
                     )}
                   </div>
                   <div className="text-xs text-muted" style={{ marginTop: 2 }}>
-                    {p.provider} · {p.model} · {p.api_key_masked}
+                    {p.provider} · {p.protocol === "anthropic" ? "Anthropic 原生" : "OpenAI 兼容"} · {p.model} · {p.api_key_masked}
                   </div>
                 </div>
 
@@ -371,6 +379,24 @@ export function LLMProviders() {
                   <option value="ollama">Ollama (本地)</option>
                   <option value="custom">自定义</option>
                 </select>
+              </div>
+
+              {/* 接口协议 */}
+              <div>
+                <label style={labelStyle}>接口协议</label>
+                <select
+                  style={inputStyle}
+                  value={form.protocol}
+                  onChange={(e) => setForm({ ...form, protocol: e.target.value })}
+                >
+                  {PROTOCOL_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+                <span className="text-muted" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                  绝大多数服务商和中转站用 OpenAI 兼容协议。只有当中转站明确说明是
+                  Anthropic / Claude 原生格式（/v1/messages）时才选 Anthropic 原生。
+                </span>
               </div>
 
               {/* API Key */}

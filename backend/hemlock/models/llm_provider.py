@@ -11,6 +11,7 @@ class LLMProvider(Base):
     id = Column(String(36), primary_key=True)
     name = Column(String(100), nullable=False)          # 用户起的名字，如 "DeepSeek-V3"
     provider = Column(String(50), nullable=False, default="openai")  # openai/deepseek/anthropic/gemini/...
+    protocol = Column(String(20), nullable=False, default="openai")  # 协议：openai（/v1/chat/completions）/ anthropic（/v1/messages）
     api_key = Column(Text, nullable=False)               # API Key
     base_url = Column(String(500), default="https://api.openai.com/v1")
     model = Column(String(100), default="gpt-4o-mini")   # 默认模型名

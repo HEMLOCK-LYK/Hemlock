@@ -28,32 +28,17 @@ _DEFAULT_TIMEOUT = httpx.Timeout(
     pool=5.0,       # 连接池等待超时
 )
 
-# 默认请求头：主流浏览器默认配置（Chrome Windows），
-# 替代 httpx 自带的 python-httpx/x.y.z 标识，让发出的请求更贴近真实浏览器流量。
-# 浏览器带哪些头，默认数据包就带哪些头（Host、Content-Length 等由 httpx 自动补充）。
+# 默认请求头：仅 UA 兜底。
+# 与 Burp 一致：用户报文里写了什么头就发什么头，不额外塞 Accept / sec-ch-ua /
+# Sec-Fetch-* 之类字段（重放抓包时这些头本来就在原始报文里，无需代劳）。
+# 只保留 UA 兜底：Agent 自造的探测请求若不带 UA，httpx 会暴露 python-httpx
+# 指纹直接被 WAF 拦截，故默认补一个 Chrome UA；用户自己写了 UA 则完全覆盖。
 _BROWSER_DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,image/apng,*/*;q=0.8,"
-        "application/signed-exchange;v=b3;q=0.7"
-    ),
-    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    # 仅声明 httpx 可解码的编码（gzip/deflate），避免 br/zstd 响应乱码
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
 }
 
 
@@ -92,11 +77,19 @@ async def close_client() -> None:
 
 
 def _parse_headers(headers_str: str) -> dict[str, str]:
-    """把 headers 字符串解析为字典。"""
+    """把 headers 字符串解析为字典。
+
+    Content-Length 一律丢弃：抓包存下的长度对应原始报文，用户在重放器里
+    改过 body 后会残留旧值，httpx 不会覆盖用户显式提供的 Content-Length，
+    导致长度与实际 body 不符，部分网关/签名校验会因此拒绝请求。
+    交由 httpx 按当前 body 重新计算。
+    """
     headers: dict[str, str] = {}
     for line in headers_str.strip().splitlines():
         if ":" in line:
             k, v = line.split(":", 1)
+            if k.strip().lower() == "content-length":
+                continue
             headers[k.strip()] = v.strip()
     return headers
 
@@ -141,7 +134,6 @@ async def send_raw_request(
             headers=headers,
             content=content,
         )
-        actual_req_headers = _headers_to_str(request.headers)
     except Exception as e:
         logger.error(f"构建请求失败: {url} - {type(e).__name__}: {e}")
         return {
@@ -150,6 +142,19 @@ async def send_raw_request(
             "body": f"[请求构建失败] {type(e).__name__}: {e}",
             "req_headers": headers_str,
         }
+
+    # 手动组装展示/入库的请求头：用户报文头按原顺序 + 自动补充的头追加在末尾。
+    # 不能直接序列化 request.headers——httpx merge 后 client 默认头（UA）会排到
+    # 最前面，导致重放后流量列表里的头顺序与重放器编辑器里看到的不一致。
+    display_headers = dict(headers)
+    if not any(k.lower() == "user-agent" for k in display_headers):
+        display_headers["User-Agent"] = _BROWSER_DEFAULT_HEADERS["User-Agent"]
+    if not any(k.lower() == "host" for k in display_headers):
+        from urllib.parse import urlparse
+        display_headers["Host"] = urlparse(url).netloc
+    if content is not None:
+        display_headers["Content-Length"] = str(len(content))
+    actual_req_headers = _headers_to_str(display_headers)
 
     import time as _time
     _t0 = _time.monotonic()

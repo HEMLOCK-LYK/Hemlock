@@ -1,15 +1,13 @@
-# Hemlock v0.5.1 Release Notes
+# Hemlock v0.5.2 Release Notes
 
 ## 本版本亮点 / What's New
 
-- **修复本地推理模型空回复**：Qwen3 等带思考模式的本地模型跑 AI 安全测试时只输出思考链、无最终回复，以前会显示 "(AI 暂无回复内容)"。现在 Agent 会自动提示模型再输出最终回答或调用工具，兜底为说明性提示
-- **端口占用自动接管**：旧版本没退出就装新版本时，后端启动自动终止占着端口的旧 Hemlock 实例再接管，解决"升级后代理打不开"；只杀 hemlock 相关进程，不误伤无关程序
-- **抓包拦截（核心）**：Burp 风格 Intercept——流量流经代理时暂停，展示原始请求/响应包，编辑后放行（Forward）/ 丢弃（Drop）。「拦截请求」「拦截响应」两层独立开关 + 全局总开关，从此人工改包、卡点调试与 AI 自动渗透同源同流
-- **所见即所得改包**：编辑区显示的就是实际发送的字节；Forward 自动重写 Content-Length、删除 Transfer-Encoding，与 Burp 自动修正一致
-- **拦截超时自动放行**：挂起 300s 无人操作自动放行，流量永不卡死
-- **上下文压缩分界线机制**：压缩结果固化到任务轨迹，恢复时线性展开、不再每轮全量重算——修复「热窗口滑动截取导致历史段缓存命中率 0」的根因，对话越长缓存收益越大
-- **记忆快照 + 分级过滤**：对话开始固化 global + 当前项目记忆为独立快照，快照逐字节稳定可命中缓存；项目记忆互不串扰
-- **Provider 上下文窗口可配置**：API Key 管理页填写 context_window，触发时机按你的模型精确控制；留空自动按服务商兜底
+- **接口协议选择（核心）**：API Key 配置支持 OpenAI 兼容（`/v1/chat/completions`）与 Anthropic 原生（`/v1/messages`）双协议。只暴露 Anthropic 原生接口的中转站现在可用；选 Anthropic 服务商自动切换协议，流式输出 / 工具调用 / 思考链全适配
+- **重放器报文忠实发送（与 Burp 一致）**：报文里写什么头就发什么头，不再混入 `sec-ch-ua` / `Sec-Fetch-*` 等多余默认字段；仅在你未写 UA 时兜底补一个 Chrome UA，避免暴露 python-httpx 指纹
+- **头字段顺序复制粘贴级一致**：重放器 Raw、流量详情、实际发送三处的请求头顺序完全相同——用户报文头按原序，自动补充的头（Host / Content-Length / 兜底 UA）统一追加在末尾
+- **修复重放「莫名 401」**：跨域重定向会剥离 Authorization/Cookie，之前写死跟随重定向，看到的是跳转目标返回的 401。新增「跟随重定向」开关，关闭后像 Burp 一样保留原始 30x 响应
+- **修复改 Host 后流量显示异常**：请求行为绝对形式（`GET http://... HTTP/1.1`）时拼接出畸形 URL（host 显示成 `xx.comhttp`、响应无效包）；现在正确识别，无 Host 头直接报解析失败
+- **Content-Length 按实际 body 重算**：改过 body 后不再残留旧长度，避免网关/签名校验拒绝
 
 ## 中文说明
 
@@ -28,12 +26,12 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 - **渐进式技能披露**：99 个内置安全技能，system prompt 只注入索引，完整指令按需加载
 - **漏洞证据链闭环**：每个漏洞附带原始请求/响应包证据，三态验证 + 自动复测
 - **抓包代理**：mitmproxy 代理，FlowTag 正则标注，单击底部面板 / 双击浮动窗口查看数据包
-- **多 LLM 接入**：OpenAI / DeepSeek / Anthropic / 通义千问 / Gemini / Kimi / 智谱 / 百川 / Ollama / 自定义
+- **多 LLM 接入**：OpenAI / DeepSeek / Anthropic / 通义千问 / Gemini / Kimi / 智谱 / 百川 / Ollama / 自定义，支持 OpenAI 兼容与 Anthropic 原生双协议中转站
 - **人在环安全控制**：敏感操作（DoS / 注入 / RCE / 数据删除）强制人工确认，300s 超时自动拒绝
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.5.1_x64-setup.exe`
+1. 下载 `Hemlock_0.5.2_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-chat`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -56,6 +54,9 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 - **Packet Intercept (Burp-style)**: request/response layer interception, WYSIWYG packet editing, Forward/Drop, 300s timeout auto-forward — manual debugging and AI-autonomous testing in one flow
 - **ReAct Autonomous Orchestration Engine**: 43 built-in tools, supports natural language instructions like "test https://xxx.com", Agent executes Recon → Test → Verify → Report four-phase autonomous workflow
+- **Dual LLM Protocol Support**: providers work over OpenAI-compatible (`/v1/chat/completions`) or Anthropic-native (`/v1/messages`) APIs — relays exposing only Anthropic's native interface are now supported, with full streaming / tool-use / reasoning support
+- **Faithful Repeater Sending (Burp-style)**: what you write is what gets sent — no extra default headers (`sec-ch-ua`, `Sec-Fetch-*`, etc.); a Chrome User-Agent fallback is added only when you don't provide one, so python-httpx fingerprints never leak
+- **Copy-Paste-Consistent Header Order**: Repeater raw view, flow detail, and the actually-sent request share identical header ordering — user headers in original order, auto-added headers (Host / Content-Length / fallback UA) appended at the end
 - **On-Demand Tool Loading**: core tools always available, discovery/file tools enabled via `load_tools` to reduce token overhead
 - **Attack Surface Discovery**: `analyze_js` extracts endpoints from JS, `fuzz_paths` brute-forces paths
 - **Smart Context Management**: stable cache prefix + index-based injection + progressive compaction (Session Memory → LLM AutoCompact)
@@ -64,12 +65,12 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 - **Progressive Skill Disclosure**: 99 built-in security skills, only index injected into system prompt
 - **Vulnerability Evidence Chain**: every finding includes raw request/response evidence, three-state verification + auto-retest
 - **Packet Capture**: mitmproxy proxy, FlowTag regex annotation, click for bottom panel / double-click for floating window
-- **Multi-LLM Support**: OpenAI / DeepSeek / Anthropic / Qwen / Gemini / Kimi / Zhipu / Baichuan / Ollama / Custom
+- **Multi-LLM Support**: OpenAI / DeepSeek / Anthropic / Qwen / Gemini / Kimi / Zhipu / Baichuan / Ollama / Custom — both OpenAI-compatible and Anthropic-native relay protocols
 - **Human-in-the-Loop Security Control**: sensitive operations (DoS / Injection / RCE / Data Deletion) require manual confirmation, 300s timeout auto-reject
 
 ### Installation
 
-1. Download `Hemlock_0.5.1_x64-setup.exe`
+1. Download `Hemlock_0.5.2_x64-setup.exe`
 2. Double-click to install and launch
 3. Configure LLM API Key in Settings (model: `deepseek-chat` recommended)
 4. Start proxy, configure browser proxy and install CA certificate
@@ -80,21 +81,4 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 - Windows 10/11 x64
 - 4GB+ RAM
 - 200MB disk space
-- Access to LLM API service
-
----
-
-### 技术栈 / Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | FastAPI + uvicorn + SQLite + SQLAlchemy 2.0 |
-| Proxy | mitmproxy 11.0 |
-| LLM SDK | openai (compatible with DeepSeek / Qwen / Kimi etc.) |
-| Desktop | Tauri v2 (Rust) |
-| Frontend | React + TypeScript + Vite |
-| Packaging | PyInstaller (backend) + Tauri bundler (frontend) |
-
-### 免责声明 / Disclaimer
-
-Hemlock is for security research and authorized testing only. Users must ensure they have legal authorization for target systems and comply with local laws. The developers are not responsible for any unauthorized testing activities.
+- Access to an LLM API service

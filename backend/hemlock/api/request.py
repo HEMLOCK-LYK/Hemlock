@@ -24,6 +24,7 @@ async def send_request(req: SendRequestRequest, db: Session = Depends(get_db)):
         url=req.url,
         headers_str=req.headers,
         body=req.body,
+        follow_redirects=req.follow_redirects,
     )
 
     resp_headers = resp.get("headers", "")
