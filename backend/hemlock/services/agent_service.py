@@ -97,7 +97,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_request",
-            "description": "发送一个无状态 HTTP 请求到目标。返回响应状态、头部、正文和 flow_id。适用于不需要会话状态的测试。生成的 flow 可被用户右键转发到 Repeater（多标签页）进行手动重放或转发到 Intruder 进行批量测试。",
+            "description": "发送一个无状态 HTTP 请求到目标。返回响应状态、头部、正文和 flow_id。适用于不需要会话状态的测试。生成的 flow 可被用户右键转发到 Repeater（多标签页）进行手动重放或转发到 Intruder 进行批量测试。默认直连目标；需要经上游代理访问目标时传 use_proxy=true。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -105,6 +105,7 @@ AGENT_TOOLS = [
                     "url": {"type": "string", "description": "完整 URL，必须在授权范围内"},
                     "headers": {"type": "string", "description": "请求头，每行一个 Key: Value"},
                     "body": {"type": "string", "description": "请求体（POST/PUT 时使用）"},
+                    "use_proxy": {"type": "boolean", "description": "true 时经上游代理发送（需在设置页已配置；默认 false 直连）"},
                 },
                 "required": ["method", "url"],
             },
@@ -114,7 +115,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_session_request",
-            "description": "使用会话状态发送 HTTP 请求，自动携带 Cookie 和认证 Token。适用于需要登录态的测试（如越权测试、认证后功能测试）。",
+            "description": "使用会话状态发送 HTTP 请求，自动携带 Cookie 和认证 Token。适用于需要登录态的测试（如越权测试、认证后功能测试）。默认直连目标；需要经上游代理访问目标时传 use_proxy=true。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -122,6 +123,7 @@ AGENT_TOOLS = [
                     "url": {"type": "string", "description": "完整 URL，必须在授权范围内"},
                     "headers": {"type": "string", "description": "额外请求头（会与 session header 合并）"},
                     "body": {"type": "string", "description": "请求体。可用 {{变量名}} 引用会话变量"},
+                    "use_proxy": {"type": "boolean", "description": "true 时经上游代理发送（需在设置页已配置；默认 false 直连）"},
                 },
                 "required": ["method", "url"],
             },
@@ -491,6 +493,10 @@ AGENT_TOOLS = [
                         "enum": ["http", "https"],
                         "description": "目标协议，默认 https。从 Host 头无法判断时使用此值。",
                     },
+                    "use_proxy": {
+                        "type": "boolean",
+                        "description": "true 时经上游代理发送（需在设置页已配置；默认 false 直连）",
+                    },
                 },
                 "required": ["raw_request"],
             },
@@ -695,6 +701,10 @@ AGENT_TOOLS = [
             "description": (
                 "执行系统终端命令（如 nmap、curl、whois、dig、nslookup、dirb 等）。\n"
                 "适用于：端口扫描、DNS 查询、WHOIS 查询、目录爆破、文件操作等需要系统工具的场景。\n"
+                "工作目录持久化：cwd 参数生效后，后续调用默认沿用同一目录（初始为工作区）；"
+                "返回值中的 cwd 即当前目录，写入文件前先确认它在哪。\n"
+                "长任务（全端口扫描、大字典爆破、慢速爬虫）传 run_in_background=true 立即返回，"
+                "用 check_background 轮询状态与输出，不要让对话干等。\n"
                 "注意：运行环境是 Windows(cmd)，无 grep/head/sed/awk/tail 等 Unix 命令（会报'不是内部或外部命令'）；"
                 "文本处理用 Python(run_script) 或 node 替代，如 run_script 执行 'import re;print(...)'。\n"
                 "此为敏感操作，需用户确认后执行。危险命令（rm -rf、format、shutdown 等）会被拦截。"
@@ -708,7 +718,15 @@ AGENT_TOOLS = [
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "超时时间（秒），默认 30，最大 300（弱口令爆破等长任务建议调大）",
+                        "description": "超时时间（秒），默认 30，最大 600（弱口令爆破等长任务建议调大或改用 run_in_background）",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "本次命令的工作目录（相对当前目录或工作区内的绝对路径），并持久化为后续默认目录",
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "true 时转入后台执行，立即返回 background_id 与日志路径（配合 check_background 使用）",
                     },
                 },
                 "required": ["command"],
@@ -778,7 +796,9 @@ AGENT_TOOLS = [
             "description": (
                 "读取工作区目录下的文件内容。\n"
                 "适用于：读取之前保存的脚本、测试结果、配置文件等。\n"
-                "文件路径相对于工作区目录，不支持绝对路径和 .. 上溯。最大读取 100KB。"
+                "文件路径相对于工作区目录，不支持绝对路径和 .. 上溯。最大读取 100KB。\n"
+                "大文件用 offset（起始行号，从 1 开始）+ limit（行数）分页读取；"
+                "二进制文件会被拒收并提示改用 run_command/run_script。"
             ),
             "parameters": {
                 "type": "object",
@@ -787,9 +807,164 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "文件路径（相对工作区），如 'scripts/exploit.py'",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始行号（从 1 开始），默认 1",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "读取的行数，不传则读到文件尾（受 100KB 上限）",
+                    },
                 },
                 "required": ["path"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": (
+                "列出工作区目录内容，用于查看目录结构与确认文件落盘结果。\n"
+                "支持 glob 过滤（如 '*.md'、'报告/*'）与 recursive 递归列举（最多返回 200 项）。\n"
+                "路径相对于工作区目录，返回相对路径可直接用于 read_file/write_file。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "目录路径（相对工作区），默认 '.' 即工作区根目录",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "glob 过滤模式，如 '*.log'、'种子*'，不传则列出全部",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "是否递归列举子目录（默认 false，只列一层）",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_background",
+            "description": (
+                "查询或终止 run_command 的后台任务（run_in_background=true 启动时返回 background_id）。\n"
+                "action=status（默认）返回运行状态、输出尾部 output_tail；action=kill 强制终止进程。\n"
+                "任务结束后后台句柄不再保留，但日志文件仍在磁盘，可按 log_path 用 read_file 读取。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "background_id": {
+                        "type": "string",
+                        "description": "run_command 后台启动时返回的 background_id",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "kill"],
+                        "description": "status=查询状态与输出尾部（默认），kill=终止进程",
+                    },
+                },
+                "required": ["background_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_navigate",
+            "description": (
+                "用内置浏览器（本机 Chrome/Edge 无头实例）打开 URL，执行页面 JS 后返回渲染结果："
+                "最终 URL、标题、可见文本、前 100 个链接、控制台错误。\n"
+                "适用于：SPA/动态渲染页面（send_request 拿不到 JS 生成内容时）、JS 挑战、"
+                "需要真实浏览器环境的登录流程。\n"
+                "同一任务复用同一标签页，登录态跨调用保持；浏览器全局共享一个进程，首次调用需数秒启动。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "要打开的 URL（http/https）",
+                    },
+                    "wait_seconds": {
+                        "type": "integer",
+                        "description": "load 事件后的额外等待秒数（JS 异步渲染重的页面建议 2-4），默认 0，最大 15",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_evaluate",
+            "description": (
+                "在当前浏览器页面内执行 JavaScript 并返回结果（支持 async IIFE 与 Promise）。\n"
+                "用于：点击/填表/提交表单、提取页面数据、读取 localStorage/sessionStorage、"
+                "调用页面同源 API（自动带 Cookie）。执行前需先 browser_navigate 到目标页。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "JS 表达式，如 `document.querySelector('#login').click()` 或 async IIFE",
+                    },
+                },
+                "required": ["expression"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": (
+                "对当前浏览器页面截图，保存到工作区 screenshots/ 目录，返回绝对路径。\n"
+                "用于：漏洞证据留存、渲染结果确认。full_page=true 时截整页。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "文件名（不含扩展名，非法字符自动替换），默认时间戳命名",
+                    },
+                    "full_page": {
+                        "type": "boolean",
+                        "description": "是否截取整页（默认 false，仅视口）",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_cookies",
+            "description": (
+                "返回当前浏览器页面可见的 Cookies（name/value/domain/httpOnly/secure）。\n"
+                "用于：确认登录态是否生效、会话属性核查。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": (
+                "重置当前任务的浏览器标签页（跳转空白页并释放会话引用，浏览器进程保留给其他任务复用）。"
+                "仅在需要重新开始浏览会话时调用；应用退出会自动回收浏览器进程。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -1176,19 +1351,26 @@ DISCOVERY_TOOL_NAMES = frozenset({
 })
 FILE_TOOL_NAMES = frozenset({
     "run_command", "run_script", "read_file", "write_file",
+    "list_files", "check_background",
+})
+BROWSER_TOOL_NAMES = frozenset({
+    "browser_navigate", "browser_evaluate", "browser_screenshot",
+    "browser_cookies", "browser_close",
 })
 # 组名 → 工具名集合
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     "discovery": DISCOVERY_TOOL_NAMES,
     "file": FILE_TOOL_NAMES,
+    "browser": BROWSER_TOOL_NAMES,
 }
 # 组名 → 展示用工具列表（load_tools 返回值告知 Agent 已加载了什么）
 GROUP_TOOL_LISTS = {
     "discovery": "analyze_js / fuzz_paths / web_search / cve_lookup / http_probe / dns_lookup / subdomain_enum / recon_search / recon报告",
-    "file": "run_command / run_script / read_file / write_file",
+    "file": "run_command / run_script / read_file / write_file / list_files / check_background",
+    "browser": "browser_navigate / browser_evaluate / browser_screenshot / browser_cookies / browser_close",
 }
 # 所有按需加载的工具名（用于过滤核心）
-OPTIONAL_TOOL_NAMES = DISCOVERY_TOOL_NAMES | FILE_TOOL_NAMES
+OPTIONAL_TOOL_NAMES = DISCOVERY_TOOL_NAMES | FILE_TOOL_NAMES | BROWSER_TOOL_NAMES
 
 # 指挥官（协作模式编排者）只读监控工具集。
 # 指挥官是总调度者，不直接执行测试（发请求 / 爆破 / 文件 / 情报侦察都委派给子 Agent）。
@@ -1219,7 +1401,11 @@ LOAD_TOOLS_TOOL_SCHEMA = {
             "- discovery：攻击面发现与情报（analyze_js 提取JS接口 / fuzz_paths 路径爆破 / "
             "web_search 联网搜索 / cve_lookup 查CVE / http_probe 探测 / dns_lookup / "
             "subdomain_enum / recon_search 资产搜索 / 侦察报告）\n"
-            "- file：终端与文件（run_command 执行命令 / run_script 执行Python / read_file / write_file）\n"
+            "- file：终端与文件（run_command 执行命令支持后台运行与持久工作目录 / run_script 执行Python / "
+            "read_file / write_file / list_files 列目录 / check_background 查询后台命令）\n"
+            "- browser：内置浏览器（browser_navigate 打开页面渲染JS / browser_evaluate 页面内执行JS / "
+            "browser_screenshot 截图 / browser_cookies 查Cookie / browser_close 关闭），适用于SPA动态页面、"
+            "JS挑战、需要真实浏览器环境渲染或截图取证的场景\n"
             "需要用到某组工具时先调用本工具，该组工具下一轮即刻可用。"
         ),
         "parameters": {
@@ -1227,11 +1413,35 @@ LOAD_TOOLS_TOOL_SCHEMA = {
             "properties": {
                 "group": {
                     "type": "string",
-                    "enum": ["discovery", "file"],
+                    "enum": ["discovery", "file", "browser"],
                     "description": "要加载的工具组名",
                 }
             },
             "required": ["group"],
+        },
+    },
+}
+
+# 实战文档库加载工具（文档库存在即注入；报告格式一篇全局可用，其余面向 SRC 模式）
+LOAD_SRC_DOC_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "load_src_doc",
+        "description": (
+            "加载内置实战文档库中的一篇，返回全文。\n"
+            "写漏洞报告前先加载 'vuln-report-format'，按其中的报告格式与定级标准产出报告（所有模式通用）；\n"
+            "其余规则与漏洞知识库（'dig-scope-workflow'、'打穿短表'、'idor-test' 等）属 SRC 漏洞挖掘模式，\n"
+            "加载哪些、何时加载遵循系统提示中 SRC 模式的索引表：对得上再开，禁止通读。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "文档名或相对路径（不带 .md 亦可）",
+                },
+            },
+            "required": ["name"],
         },
     },
 }
@@ -1298,6 +1508,11 @@ def build_agent_tools(
     # load_tools 始终可用（核心工具，用于按需加载工具组）
     tools.append(LOAD_TOOLS_TOOL_SCHEMA)
 
+    # 实战文档库：存在即注入 load_src_doc（报告格式一篇全模式可用；
+    # 其余文档面向 SRC 模式）。独立于 skill 体系（前端技能列表不可见）。
+    if _src_pack_available():
+        tools.append(LOAD_SRC_DOC_TOOL_SCHEMA)
+
     # 指挥官专用工具（spawn_subagent）——子 Agent 不可使用，防止递归
     if include_coordinator_tools:
         tools.append(SPAWN_SUBAGENT_TOOL)
@@ -1338,7 +1553,7 @@ SYSTEM_PROMPT = """你是 Hemlock 的 AI 安全测试 Agent，辅助用户完成
 5. **合规红线**：禁止内网横向/业务中断/后门/删除；SQL 注入只取库名/版本/用户名不深入；写入操作先确认；所有请求须在授权范围。
 
 ## 方法论（详细策略已注入下方策略库，此处为执行流程）
-工具按需加载：核心工具始终可用；发现/情报类（analyze_js/fuzz_paths/web_search/cve_lookup/http_probe/recon_search 等）与文件类（run_command/run_script 等）需先调用 load_tools(组名) 加载后可用。
+工具按需加载：核心工具始终可用；发现/情报类（analyze_js/fuzz_paths/web_search/cve_lookup/http_probe/recon_search 等）、文件类（run_command/read_file 等）与浏览器类（browser_navigate/browser_evaluate 等，SPA 动态页面/截图取证时用）需先调用 load_tools(组名) 加载后可用。
 给目标并要求测试时，按三阶段推进：
 1. **侦察**：先 analyze_js / fuzz_paths / http_probe 发现攻击面（接口/参数/技术栈），对参数投探针收集异常信号。
 2. **深测**：构建系统画像（Swagger/API 清单），梳理权限边界，逆向推演开发者易错点，生成 P0/P1/P2 推论逐条验证。
@@ -1379,6 +1594,36 @@ AUTO_PENTEST_PROMPT = """
 ## 当前模式：自动化渗透测试
 用户给出目标 URL 时：确认目标后立即开始侦察，无需反复询问；按 侦察→深测→验证 推进，每阶段简要汇报；发现漏洞立即验证报告；敏感操作暂停询问；测完输出总结报告。
 """
+
+
+# ===== SRC 漏洞挖掘模式（独立文档库，不进 skill 体系） =====
+# 文档库位于 data/src_pack（gitignore 不入库，打包时随 data 目录进 exe）。
+# 与 skill_registry 完全隔离：不进用户技能目录、不出现在前端技能列表、
+# 不参与 build_skills_prompt —— 仅通过 load_src_doc 工具按需读全文。
+_SRC_PACK_DIR = Path(__file__).parent.parent / "data" / "src_pack"
+_SRC_PROMPT_CACHE: str | None = None
+
+
+def _src_pack_available() -> bool:
+    """文档库是否可用（存在 SRC_PROMPT.md 入口）。"""
+    if _SRC_PROMPT_CACHE:
+        return True
+    return (_SRC_PACK_DIR / "SRC_PROMPT.md").is_file()
+
+
+def _load_src_prompt() -> str:
+    """读取 SRC 主控提示词（src_pack/SRC_PROMPT.md），模块级缓存。
+
+    注入稳定段（system_content 追加），缓存后逐字节稳定，跨请求缓存前缀可命中；
+    文件变更需重启后端生效（提示词不是热改内容）。缺失返回空串。
+    """
+    global _SRC_PROMPT_CACHE
+    if _SRC_PROMPT_CACHE is None:
+        try:
+            _SRC_PROMPT_CACHE = (_SRC_PACK_DIR / "SRC_PROMPT.md").read_text(encoding="utf-8")
+        except OSError:
+            _SRC_PROMPT_CACHE = ""
+    return _SRC_PROMPT_CACHE
 
 
 # ===== 多 Agent 协作：指挥官系统提示词 =====
@@ -1498,6 +1743,12 @@ class AgentOrchestrator:
         self._context_inject_interval = 5
         # 已加载的按需工具组（discovery/file），随 load_tools 调用增长
         self.loaded_groups: set[str] = set()
+        # 命令执行持久工作目录（run_command cwd 参数；跨调用沿用，初始为 workspace）
+        self._cwd: Path | None = None
+        # 后台命令注册表：background_id -> {"proc", "log_path", "command"}
+        self._bg_procs: dict[str, dict] = {}
+        # 内置浏览器会话（惰性创建；任务内复用同一标签页保持登录态）
+        self._browser = None
 
     def cancel(self):
         """立即终止：置停止标志 + 丢弃积压的插入消息 + 唤醒确认等待。
@@ -1509,6 +1760,15 @@ class AgentOrchestrator:
         self.clear_inbox()
         if self._confirm_event:
             self._confirm_event.set()
+        # 终止本任务启动的后台命令（run_command run_in_background），
+        # 避免"用户已停止测试但扫描进程还在跑"
+        for entry in list(self._bg_procs.values()):
+            try:
+                proc = entry.get("proc")
+                if proc and proc.returncode is None:
+                    proc.terminate()
+            except Exception:
+                pass
 
     # ===== 对话模式中途插入消息 =====
     def enqueue_user_message(self, message: str) -> None:
@@ -1892,12 +2152,28 @@ class AgentOrchestrator:
             return self._tool_write_file(args)
         elif name == "read_file":
             return self._tool_read_file(args)
+        elif name == "list_files":
+            return self._tool_list_files(args)
+        elif name == "check_background":
+            return await self._tool_check_background(args)
+        elif name == "browser_navigate":
+            return await self._tool_browser_navigate(args)
+        elif name == "browser_evaluate":
+            return await self._tool_browser_evaluate(args)
+        elif name == "browser_screenshot":
+            return await self._tool_browser_screenshot(args)
+        elif name == "browser_cookies":
+            return await self._tool_browser_cookies(args)
+        elif name == "browser_close":
+            return await self._tool_browser_close(args)
         elif name == "save_memory":
             return self._tool_save_memory(args)
         elif name == "get_memory":
             return self._tool_get_memory(args)
         elif name == "load_tools":
             return self._tool_load_tools(args)
+        elif name == "load_src_doc":
+            return self._tool_load_src_doc(args)
         elif name == "analyze_js":
             return await self._tool_analyze_js(args)
         elif name == "fuzz_paths":
@@ -2050,7 +2326,13 @@ class AgentOrchestrator:
         headers = args.get("headers", "")
         body = args.get("body", "")
 
-        resp = await send_raw_request(method=method, url=url, headers_str=headers, body=body)
+        resp = await send_raw_request(
+            method=method,
+            url=url,
+            headers_str=headers,
+            body=body,
+            use_proxy=bool(args.get("use_proxy")),
+        )
 
         _rh = resp.get("headers", "")
         _rb = resp.get("body", "")
@@ -2098,6 +2380,7 @@ class AgentOrchestrator:
             url=url,
             headers_str=headers,
             body=body,
+            use_proxy=bool(args.get("use_proxy")),
         )
 
         _rh = resp.get("headers", "")
@@ -3275,6 +3558,54 @@ class AgentOrchestrator:
         except Exception:
             return None
 
+    def _resolve_cwd(self, cwd_arg: str | None) -> tuple[Path, str | None]:
+        """解析命令工作目录：相对路径基于当前持久 cwd（默认工作区），绝对路径须在工作区内。
+
+        返回 (解析后的目录, 错误消息)；成功时错误消息为 None。
+        工作区外禁止执行命令（与文件工具同一安全边界）。
+        """
+        ws = self._get_workspace()
+        if not cwd_arg or not cwd_arg.strip():
+            return (self._cwd or ws), None
+        raw = cwd_arg.strip()
+        try:
+            p = Path(raw)
+            base = self._cwd or ws
+            target = (p if p.is_absolute() else base / p).resolve()
+            if not target.is_relative_to(ws):
+                return (ws, f"路径越出工作区（命令执行仅限工作区内）: {raw}")
+            if not target.exists():
+                return (ws, f"目录不存在: {raw}")
+            if not target.is_dir():
+                return (ws, f"不是目录: {raw}")
+            return (target, None)
+        except Exception:
+            return (ws, f"无效路径: {raw}")
+
+    @staticmethod
+    def _subprocess_proxy_env() -> dict[str, str] | None:
+        """构建子进程环境变量：配置了上游代理时注入 HTTP(S)_PROXY。
+
+        让 curl/nmap 等命令的网络流量与全局代理策略一致（对齐 Claude Code：
+        Agent 知道系统网络出口并默认使用）。NO_PROXY 排除本机回环，
+        避免访问本地服务（含 mitmproxy 自身）被代理截胡。
+        返回 None 表示使用当前环境（未配置代理）。
+        """
+        upstream = (getattr(settings, "upstream_proxy", "") or "").strip()
+        if not upstream:
+            return None
+        if not upstream.startswith(("http://", "https://", "socks5://", "socks4://")):
+            upstream = f"http://{upstream}"
+        import os
+        env = os.environ.copy()
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "http_proxy", "https_proxy", "all_proxy"):
+            env[key] = upstream
+        no_proxy = "localhost,127.0.0.1,::1"
+        env["NO_PROXY"] = no_proxy
+        env["no_proxy"] = no_proxy
+        return env
+
     async def _tool_run_command(self, args: dict) -> dict:
         """执行系统终端命令。
 
@@ -3282,12 +3613,17 @@ class AgentOrchestrator:
         危险命令会被拦截，输出截断到 10000 字符。
         命令在 Agent 工作区（用户安装目录/workspace）下执行，
         生成的输出文件落盘到用户目录而非打包只读目录（BUG 修复）。
+
+        对齐 Claude Code 体验：
+        - cwd 持久化（self._cwd），跨调用沿用；返回值始终带当前 cwd 与 workspace 绝对路径
+        - run_in_background=true 转后台，立即返回 background_id + 日志路径，check_background 轮询
+        - 超时上限 300s -> 600s（长扫描/爆破场景）
         """
         command = args.get("command", "").strip()
         if not command:
             return {"error": "command 参数不能为空"}
 
-        timeout = min(args.get("timeout", 30), 300)
+        timeout = min(args.get("timeout", 30), 600)
 
         # 危险命令检查
         cmd_lower = command.lower()
@@ -3295,24 +3631,32 @@ class AgentOrchestrator:
             if pattern in cmd_lower:
                 return {"error": f"危险命令已被拦截：包含 '{pattern}'"}
 
+        # 工作目录：解析并持久化（后续调用默认沿用）
+        workdir_path, cwd_err = self._resolve_cwd(args.get("cwd"))
+        if cwd_err:
+            return {"error": cwd_err, "workspace": str(self._get_workspace())}
+        self._cwd = workdir_path
+        workdir = str(workdir_path)
+
         try:
-            import subprocess
             import os
 
             # Windows: CREATE_NO_WINDOW 避免弹出控制台窗口
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = 0x08000000  # CREATE_NO_WINDOW
+            creationflags = 0x08000000 if os.name == "nt" else 0
 
-            # 工作目录 = 用户安装目录下的 workspace（不存在则自动创建）
-            workdir = str(self._get_workspace())
+            # 后台执行：输出落盘到 .agent_bg/{id}.log，立即返回
+            if args.get("run_in_background"):
+                return await self._run_command_background(command, workdir, creationflags)
+
+            proxy_env = self._subprocess_proxy_env()
 
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=workdir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                creationflags=creationflags if os.name == "nt" else 0,
+                creationflags=creationflags,
+                env=proxy_env,
             )
 
             try:
@@ -3325,7 +3669,9 @@ class AgentOrchestrator:
                 return {
                     "error": f"命令执行超时（{timeout}s）",
                     "command": command,
-                    "partial_output": "进程已被终止",
+                    "cwd": workdir,
+                    "workspace": str(self._get_workspace()),
+                    "partial_output": "进程已被终止；长任务建议 run_in_background=true",
                 }
 
             stdout_text = stdout.decode("utf-8", errors="replace")
@@ -3338,16 +3684,186 @@ class AgentOrchestrator:
             if len(stderr_text) > max_output:
                 stderr_text = stderr_text[:max_output] + f"\n... [错误输出已截断，共 {len(stderr_text)} 字符]"
 
-            return {
+            result = {
                 "command": command,
                 "exit_code": proc.returncode,
                 "stdout": stdout_text,
                 "stderr": stderr_text,
+                "cwd": workdir,
+                "workspace": str(self._get_workspace()),
                 "success": proc.returncode == 0,
             }
+            if proxy_env:
+                result["proxy"] = "命令网络流量已默认走上游代理（localhost 除外）"
+            return result
 
         except Exception as e:
             return {"error": f"命令执行失败: {type(e).__name__}: {e}", "command": command}
+
+    async def _run_command_background(
+        self, command: str, workdir: str, creationflags: int
+    ) -> dict:
+        """后台执行命令：stdout/stderr 合并落盘到 .agent_bg/{id}.log，立即返回。
+
+        进程注册到 self._bg_procs，用 check_background 查询/终止。
+        任务被 cancel() 时会统一终止所有仍在运行的后台进程。
+        """
+        import uuid
+
+        bg_id = uuid.uuid4().hex[:8]
+        log_path = self._get_workspace() / ".agent_bg" / f"{bg_id}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(log_path, "ab") as log_f:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=workdir,
+                stdout=log_f,
+                stderr=asyncio.subprocess.STDOUT,
+                creationflags=creationflags,
+                env=self._subprocess_proxy_env(),
+            )
+
+        self._bg_procs[bg_id] = {
+            "proc": proc,
+            "log_path": log_path,
+            "command": command,
+        }
+        return {
+            "background_id": bg_id,
+            "command": command,
+            "cwd": workdir,
+            "workspace": str(self._get_workspace()),
+            "log_path": str(log_path),
+            "message": (
+                "命令已转入后台执行。用 check_background(background_id) 查询状态与输出；"
+                "日志文件也可直接 read_file 读取。"
+            ),
+        }
+
+    async def _tool_check_background(self, args: dict) -> dict:
+        """查询/终止后台命令（配合 run_command run_in_background=true）。"""
+        bg_id = (args.get("background_id") or "").strip()
+        action = (args.get("action") or "status").strip().lower()
+        entry = self._bg_procs.get(bg_id)
+        if not entry:
+            return {
+                "error": f"后台任务不存在: {bg_id}",
+                "known_ids": sorted(self._bg_procs.keys()),
+                "hint": (
+                    "background_id 由 run_command(run_in_background=true) 返回；"
+                    "任务结束后句柄不再保留，可直接 read_file 读取当时的 log_path 日志。"
+                ),
+            }
+
+        proc: asyncio.subprocess.Process = entry["proc"]
+        log_path: Path = entry["log_path"]
+
+        if action == "kill":
+            if proc.returncode is not None:
+                return {
+                    "background_id": bg_id,
+                    "killed": False,
+                    "exit_code": proc.returncode,
+                    "message": "进程已退出，无需终止",
+                    "log_path": str(log_path),
+                }
+            try:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            except ProcessLookupError:
+                pass
+            return {
+                "background_id": bg_id,
+                "killed": True,
+                "command": entry["command"],
+                "log_path": str(log_path),
+                "workspace": str(self._get_workspace()),
+            }
+
+        # status：进程可能已退出但 returncode 尚未收割（后台启动后未 await 过），
+        # 用近似零超时的 wait 收割一次
+        if proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=0.05)
+            except asyncio.TimeoutError:
+                pass
+
+        running = proc.returncode is None
+        result = {
+            "background_id": bg_id,
+            "command": entry["command"],
+            "running": running,
+            "output_tail": self._tail_file(log_path),
+            "log_path": str(log_path),
+            "workspace": str(self._get_workspace()),
+        }
+        if not running:
+            result["exit_code"] = proc.returncode
+        return result
+
+    @staticmethod
+    def _tail_file(path: Path, max_chars: int = 4000) -> str:
+        """读取文件尾部若干字符（后台命令输出预览）。文件不存在返回空串。"""
+        try:
+            data = path.read_bytes()[-max_chars * 2:]
+            text = data.decode("utf-8", errors="replace")
+            if len(text) > max_chars:
+                text = text[-max_chars:]
+            return text
+        except Exception:
+            return ""
+
+    # ===== 内置浏览器工具（CDP 驱动本机 Chrome/Edge，全局可用）=====
+
+    def _get_browser(self):
+        """惰性获取本任务的浏览器会话（任务内跨调用复用同一标签页）。"""
+        if self._browser is None:
+            from hemlock.core.browser_driver import get_browser_session
+            self._browser = get_browser_session()
+        return self._browser
+
+    async def _tool_browser_navigate(self, args: dict) -> dict:
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"error": "url 参数不能为空"}
+        try:
+            wait = float(args.get("wait_seconds") or 0)
+        except (TypeError, ValueError):
+            wait = 0
+        return await self._get_browser().navigate(url, wait_seconds=wait)
+
+    async def _tool_browser_evaluate(self, args: dict) -> dict:
+        return await self._get_browser().evaluate(args.get("expression") or "")
+
+    async def _tool_browser_screenshot(self, args: dict) -> dict:
+        return await self._get_browser().screenshot(
+            name=(args.get("name") or "").strip(),
+            full_page=bool(args.get("full_page")),
+        )
+
+    async def _tool_browser_cookies(self, args: dict) -> dict:
+        return await self._get_browser().cookies()
+
+    async def _tool_browser_close(self, args: dict) -> dict:
+        """重置本任务的浏览器标签页（浏览器进程全局共享，不在此处杀进程）。"""
+        session = self._browser
+        if session is None:
+            return {"success": True, "message": "本任务尚未使用浏览器"}
+        try:
+            await session.navigate("about:blank")
+        except Exception:
+            pass
+        try:
+            await session._reset_tab()
+        except Exception:
+            pass
+        self._browser = None
+        return {"success": True, "message": "浏览器标签页已重置"}
 
     def _resolve_python_command(self) -> list[str] | None:
         """解析用于执行脚本的 Python 命令（argv 前缀）。
@@ -3424,6 +3940,7 @@ class AgentOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=creationflags if os.name == "nt" else 0,
+                env=self._subprocess_proxy_env(),
             )
 
             try:
@@ -3497,7 +4014,12 @@ class AgentOrchestrator:
             return {"error": f"写入文件失败: {type(e).__name__}: {e}"}
 
     def _tool_read_file(self, args: dict) -> dict:
-        """读取工作区文件内容。"""
+        """读取工作区文件内容。
+
+        对齐 Claude Code 体验：offset/limit 按行分页读大文件；
+        二进制文件拒收并提示改用 run_command/run_script；
+        返回值带 absolute_path，Agent 与用户都能确认文件真实位置。
+        """
         rel_path = args.get("path", "").strip()
         if not rel_path:
             return {"error": "path 参数不能为空"}
@@ -3508,30 +4030,119 @@ class AgentOrchestrator:
 
         if not target.exists():
             return {"error": f"文件不存在: {rel_path}"}
+        if target.is_dir():
+            return {"error": f"这是目录，请用 list_files 查看: {rel_path}"}
+
+        try:
+            offset = max(int(args.get("offset") or 1), 1)
+        except (TypeError, ValueError):
+            offset = 1
+        limit = args.get("limit")
+        try:
+            limit = max(int(limit), 1) if limit else None
+        except (TypeError, ValueError):
+            limit = None
 
         try:
             size = target.stat().st_size
-            if size > 100 * 1024:  # 100KB
-                with open(target, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read(100 * 1024)
-                return {
-                    "path": rel_path,
-                    "content": content + "\n... [文件过大，已截断到 100KB]",
-                    "size": size,
-                    "truncated": True,
-                }
 
+            # 二进制检测：头部出现 NUL 字节即按二进制拒收
+            with open(target, "rb") as f:
+                if b"\x00" in f.read(8192):
+                    return {
+                        "error": f"二进制文件，无法按文本读取: {rel_path}",
+                        "size": size,
+                        "hint": "用 run_command 或 run_script 处理二进制文件",
+                    }
+
+            content = ""
             with open(target, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
+                if offset > 1 or limit is not None:
+                    import itertools
+                    f_iter = f
+                    if offset > 1:
+                        f_iter = itertools.islice(f_iter, offset - 1, None)
+                    if limit is not None:
+                        f_iter = itertools.islice(f_iter, limit)
+                    content = "".join(f_iter)
+                else:
+                    content = f.read(100 * 1024)
 
-            return {
+            truncated = False
+            if len(content) > 100 * 1024:
+                content = content[:100 * 1024]
+                truncated = True
+
+            result = {
                 "path": rel_path,
+                "absolute_path": str(target),
                 "content": content,
                 "size": size,
-                "truncated": False,
+                "truncated": truncated,
             }
+            if offset > 1:
+                result["offset"] = offset
+            if limit is not None:
+                result["limit"] = limit
+            if truncated:
+                result["hint"] = "内容已截断到 100KB；继续读取用 offset/limit 分页"
+            return result
         except Exception as e:
             return {"error": f"读取文件失败: {type(e).__name__}: {e}"}
+
+    def _tool_list_files(self, args: dict) -> dict:
+        """列出工作区目录内容（文件管理：看结构、确认落盘结果）。
+
+        支持 glob 过滤与递归；返回相对路径可直接喂给 read_file/write_file。
+        """
+        rel_dir = (args.get("path") or ".").strip()
+        pattern = (args.get("pattern") or "").strip()
+        recursive = bool(args.get("recursive"))
+        ws = self._get_workspace()
+
+        base = self._safe_path(rel_dir)
+        if base is None:
+            return {"error": f"不安全的路径: {rel_dir}（仅允许工作区内）", "workspace": str(ws)}
+        if not base.exists():
+            return {"error": f"目录不存在: {rel_dir}", "workspace": str(ws)}
+        if not base.is_dir():
+            return {"error": f"不是目录: {rel_dir}", "workspace": str(ws)}
+
+        from datetime import datetime
+
+        entries: list[dict] = []
+        limit_entries = 200
+        try:
+            if recursive:
+                it = base.rglob(pattern or "*")
+            elif pattern:
+                it = base.glob(pattern)
+            else:
+                it = base.iterdir()
+            for p in it:
+                try:
+                    stat = p.stat()
+                    entries.append({
+                        "path": p.relative_to(ws).as_posix(),
+                        "type": "dir" if p.is_dir() else "file",
+                        "size": stat.st_size if p.is_file() else None,
+                        "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    })
+                except OSError:
+                    continue
+                if len(entries) >= limit_entries:
+                    break
+        except Exception as e:
+            return {"error": f"列目录失败: {type(e).__name__}: {e}", "workspace": str(ws)}
+
+        entries.sort(key=lambda e: (e["type"] != "dir", e["path"]))
+        return {
+            "path": rel_dir,
+            "workspace": str(ws),
+            "count": len(entries),
+            "entries": entries,
+            **({"note": f"已达 {limit_entries} 项上限，结果可能不完整；可用 pattern 收窄"} if len(entries) >= limit_entries else {}),
+        }
 
     # ===== 记忆系统工具 =====
 
@@ -3618,6 +4229,53 @@ class AgentOrchestrator:
             "group": group,
             "loaded_tools": GROUP_TOOL_LISTS.get(group, ""),
             "message": f"工具组 '{group}' 已加载，现在可以调用：{GROUP_TOOL_LISTS.get(group, '')}",
+        }
+
+    def _tool_load_src_doc(self, args: dict) -> dict:
+        """读取 SRC 文档库一篇全文（路径严格限定在 src_pack 内，防穿越）。"""
+        name = (args.get("name") or "").strip().strip("/").strip()
+        if not name:
+            return {"error": "name 参数不能为空"}
+        if not _src_pack_available():
+            return {"error": "SRC 文档库不可用（src_pack 未安装）"}
+
+        base = _SRC_PACK_DIR.resolve()
+        name_noext = name[:-3] if name.endswith(".md") else name
+
+        # 候选：显式相对路径（含 / 或 \）按路径解析（知识库文档在 skills/ 下，一并尝试）；
+        # 纯名字在常见子目录中查找
+        candidates: list[Path] = []
+        if "/" in name_noext or "\\" in name_noext:
+            candidates.append(base / (name_noext + ".md"))
+            candidates.append(base / name_noext)
+            candidates.append(base / "skills" / (name_noext + ".md"))
+            candidates.append(base / "skills" / name_noext)
+        else:
+            for sub in (".", "rules", "skills", "skills/知识库"):
+                candidates.append(base / sub / (name_noext + ".md"))
+
+        for cand in candidates:
+            try:
+                resolved = cand.resolve()
+                if not resolved.is_relative_to(base) or not resolved.is_file():
+                    continue
+                text = resolved.read_text(encoding="utf-8", errors="replace")
+                truncated = False
+                if len(text) > 200_000:
+                    text = text[:200_000] + "\n... [文档过长已截断]"
+                    truncated = True
+                return {
+                    "name": name,
+                    "path": resolved.relative_to(base).as_posix(),
+                    "content": text,
+                    "truncated": truncated,
+                }
+            except OSError:
+                continue
+
+        return {
+            "error": f"文档不存在: {name}",
+            "hint": "用规则/知识库中的文件名加载（不带 .md 亦可），如 dig-scope-workflow、idor-test",
         }
 
     async def _tool_analyze_js(self, args: dict) -> dict:
@@ -4070,10 +4728,17 @@ class AgentOrchestrator:
                 url=url,
                 headers_str=headers,
                 body=body,
+                use_proxy=bool(args.get("use_proxy")),
             )
             source = "agent_raw_session"
         else:
-            resp = await send_raw_request(method=method, url=url, headers_str=headers, body=body)
+            resp = await send_raw_request(
+                method=method,
+                url=url,
+                headers_str=headers,
+                body=body,
+                use_proxy=bool(args.get("use_proxy")),
+            )
             source = "agent_raw"
 
         _rh = resp.get("headers", "")
@@ -4959,7 +5624,9 @@ def update_finding_status(db: Session, finding_id: str, status: str) -> Finding 
 MAX_CHAT_TOOL_CALLS = 200
 # 对话模式单次 LLM 调用看门狗（秒）：防止 LLM 挂起/超长导致"无法停止"
 # 超时后该轮结束并返回错误提示（线程在后台结束，任务可继续/停止）
-_CHAT_LLM_WATCHDOG = 180
+# 300s：本地推理模型（如 Qwen3 思考模式）+ 长上下文时单次调用常超 180s，
+# 看门狗过短会把进行中的安全测试直接判死，用户侧表现为"测试自动结束"
+_CHAT_LLM_WATCHDOG = 300
 # 推理模型（如本地 Qwen3 思考模式）"只输出思考、无最终内容/工具调用"的最大纠错次数。
 # 达到上限后不再死循环，改用兜底回复结束本轮。
 MAX_REASONING_ONLY_RETRY = 1
@@ -5124,6 +5791,9 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
     # 自动化渗透测试模式提示
     if getattr(settings, "auto_pentest", True):
         system_content += AUTO_PENTEST_PROMPT
+    # SRC 漏洞挖掘模式提示（稳定段：文件内容缓存后逐字节稳定，缓存前缀可命中）
+    if getattr(settings, "src_hunting", False):
+        system_content += _load_src_prompt()
     messages: list[dict] = [{"role": "system", "content": system_content}]
 
     # 动态段：动态注入已启用的 Skill 列表（渐进式披露：仅 name + description）
@@ -5157,6 +5827,25 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
             pass
     if dynamic_content:
         messages.append({"role": "system", "content": dynamic_content})
+
+    # ===== 网络出口知情（配置了上游代理时）=====
+    # 告知 Agent 三条路径的代理策略：目标请求默认直连可显式走代理、
+    # 情报工具自动兜底、命令行子进程默认走代理。不依赖 db，独立于动态段。
+    upstream = (getattr(settings, "upstream_proxy", "") or "").strip()
+    if upstream:
+        messages.append({
+            "role": "system",
+            "content": (
+                "## 网络出口\n"
+                f"当前已配置上游代理：{upstream}\n"
+                "- send_request / send_session_request / send_raw_request 默认直连目标；"
+                "需要经代理访问目标时传 use_proxy=true（未配置代理时会明确报错）。\n"
+                "- cve_lookup / web_search 直连失败会自动改走该代理重试。\n"
+                "- run_command / run_script 子进程已默认注入 HTTP_PROXY/HTTPS_PROXY"
+                "（curl 等自动走代理；localhost/127.0.0.1 不走）。\n"
+                "- 内置浏览器（browser 组）启动时跟随该代理（localhost 自动绕过）。"
+            ),
+        })
 
     # ===== 分界线机制：线性展开（历史 compaction 固化，不重算）=====
     # 遇到 compaction 步骤直接展开其压缩结果，历史段逐字节稳定 → 前缀缓存命中。

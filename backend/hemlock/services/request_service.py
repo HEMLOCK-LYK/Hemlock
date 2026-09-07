@@ -7,6 +7,8 @@ import logging
 import httpx
 from typing import Any
 
+from hemlock.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ===== 共享连接池 =====
@@ -99,14 +101,73 @@ def _headers_to_str(headers) -> str:
     return "\n".join(f"{k}: {v}" for k, v in headers.items())
 
 
+def _resolve_upstream(proxy_str: str | None) -> str:
+    """规整上游代理地址：去空白；无 scheme 时补 http://。"""
+    p = (proxy_str or "").strip()
+    if p and not p.startswith(("http://", "https://", "socks5://", "socks4://")):
+        p = f"http://{p}"
+    return p
+
+
+async def _select_client(use_proxy: bool = False) -> tuple[httpx.AsyncClient, bool]:
+    """选择请求客户端。
+
+    返回 (client, is_temporary)：
+    - use_proxy=False：共享直连池（调用方勿关闭）
+    - use_proxy=True：一次性上游代理客户端（调用方负责 aclose）；
+      未配置上游代理时抛 RuntimeError
+    """
+    if not use_proxy:
+        return await get_client(), False
+    upstream = _resolve_upstream(getattr(settings, "upstream_proxy", ""))
+    if not upstream:
+        raise RuntimeError(
+            "未配置上游代理（设置 → 代理 → 上游代理），无法经代理发送请求；"
+            "可直连重试（use_proxy=false）或先在设置页配置上游代理"
+        )
+    temp = httpx.AsyncClient(
+        verify=False,
+        timeout=_DEFAULT_TIMEOUT,
+        follow_redirects=True,
+        http2=False,
+        trust_env=False,
+        proxy=upstream,
+        headers=dict(_BROWSER_DEFAULT_HEADERS),
+    )
+    return temp, True
+
+
 async def send_raw_request(
     method: str,
     url: str,
     headers_str: str = "",
     body: str = "",
     follow_redirects: bool = True,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """发送 HTTP 请求，返回响应字典。
+
+    默认走共享直连池（trust_env=False，不经任何代理）；use_proxy=True 时
+    用一次性客户端显式经上游代理发送（未配置上游代理则报错）。
+    代理请求同样会作为 Flow 入库（由调用方决定）。
+    """
+    client, is_temp = await _select_client(use_proxy)
+    try:
+        return await _send_raw_impl(client, method, url, headers_str, body, follow_redirects)
+    finally:
+        if is_temp:
+            await client.aclose()
+
+
+async def _send_raw_impl(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    headers_str: str = "",
+    body: str = "",
+    follow_redirects: bool = True,
+) -> dict[str, Any]:
+    """send_raw_request 主体（client 由调用方注入，此处不管理其生命周期）。
 
     使用共享连接池，避免重复 TCP 握手。
     使用 build_request 捕获 httpx 自动添加的头部（Host、User-Agent 等），
@@ -123,7 +184,6 @@ async def send_raw_request(
     返回: {"status": int, "headers": str, "body": str, "req_headers": str}
     """
     headers = _parse_headers(headers_str)
-    client = await get_client()
     content = body.encode("utf-8") if body else None
 
     # 先构建 Request 对象，捕获所有实际发送的头部（含 Host 等自动添加项）

@@ -15,6 +15,7 @@ import {
   X,
   Trash2,
   Zap,
+  Crosshair,
   Square,
   Brain,
   Users,
@@ -59,6 +60,27 @@ const STATUS_COLORS: Record<string, string> = {
   done: "var(--accent-blue)",
   failed: "var(--accent-red)",
 };
+
+// 记住离开页面时正在看的任务：切页会整树重挂本组件（App.tsx 以 path 为 key），
+// 回来时优先恢复到原任务，而不是被切到最新一条
+const LAST_TASK_KEY = "hemlock.agent.lastTaskId";
+
+function readLastViewedTaskId(): string | null {
+  try {
+    return sessionStorage.getItem(LAST_TASK_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastViewedTaskId(taskId: string | null) {
+  try {
+    if (taskId) sessionStorage.setItem(LAST_TASK_KEY, taskId);
+    else sessionStorage.removeItem(LAST_TASK_KEY);
+  } catch {
+    // 隐私模式等场景下静默失败即可
+  }
+}
 
 // ===== 类型定义 =====
 
@@ -469,6 +491,8 @@ export function AgentView() {
   // 自动化渗透测试模式是否开启
   const [autoPentestEnabled, setAutoPentestEnabled] = useState(false);
   const [togglingAutoPentest, setTogglingAutoPentest] = useState(false);
+  const [srcHuntingEnabled, setSrcHuntingEnabled] = useState(false);
+  const [togglingSrcHunting, setTogglingSrcHunting] = useState(false);
   // P1 修复：敏感操作确认状态
   const [pendingConfirmation, setPendingConfirmation] = useState<{
     taskId: string;
@@ -523,28 +547,49 @@ export function AgentView() {
       const data = await agentApi.listTasks(50, projectId || undefined);
       if (!isMountedRef.current) return;
       setTasks(data);
-      // 任务状态已终止（非 running / paused）→ 从运行集合中清除（修复：任务结束仍显示"工作中"）
-      // 注意：对话模式任务完成后状态为 idle（而非 done/failed），也必须清除，
-      // 否则输入框会一直锁定（BUG：任务完成但输入框无法输入，必须手动停止）
+      // 运行状态双向对账（修复：切页回来后"运行中"标记丢失，看起来像测试已结束）：
+      // ① API 已终止（非 running / paused）的任务 → 从运行集合清除（修复：任务结束仍显示"工作中"）。
+      //    注意：对话模式任务完成后状态为 idle（而非 done/failed），也必须清除，
+      //    否则输入框会一直锁定（BUG：任务完成但输入框无法输入，必须手动停止）
+      // ② API 显示 running / paused 的任务 → 加回运行集合。切页会整树重挂本组件，
+      //    而后端对话循环仍在跑；不恢复的话停止按钮/运行徽标全部消失，观感即"测试被中断"
+      const live = new Set(
+        data
+          .filter((t) => t.status === "running" || t.status === "paused")
+          .map((t) => t.id)
+      );
       const terminal = new Set(
         data
           .filter((t) => t.status !== "running" && t.status !== "paused")
           .map((t) => t.id)
       );
-      if (terminal.size > 0) {
-        setRunningTasks((prev) => {
-          const n = new Set(prev);
-          let changed = false;
-          terminal.forEach((id) => {
-            if (n.delete(id)) changed = true;
-          });
-          return changed ? n : prev;
+      {
+        const n = new Set(runningTasksRef.current);
+        let changed = false;
+        terminal.forEach((id) => {
+          if (n.delete(id)) changed = true;
         });
+        live.forEach((id) => {
+          if (!n.has(id)) {
+            n.add(id);
+            changed = true;
+          }
+        });
+        if (changed) {
+          runningTasksRef.current = n;
+          setRunningTasks(n);
+        }
       }
-      // 自动选中最近一条会话（无论状态），避免用户看到空白聊天区域
+      // 自动选中：优先回到离开时正在看的任务（sessionStorage 记忆），
+      // 其次最近一条运行中的任务，否则最新一条——避免用户看到空白聊天区域
       if (data.length > 0 && !selectedTaskId.current) {
-        selectedTaskId.current = data[0].id;
-        await refreshTaskDetail(data[0].id);
+        const lastViewed = readLastViewedTaskId();
+        const exists = lastViewed && data.some((t) => t.id === lastViewed);
+        const runningTask = data.find((t) => t.status === "running");
+        const target = exists ? lastViewed! : runningTask?.id ?? data[0].id;
+        selectedTaskId.current = target;
+        writeLastViewedTaskId(target);
+        await refreshTaskDetail(target);
       }
     } catch (e) {
       console.error(e);
@@ -586,41 +631,14 @@ export function AgentView() {
     runningTasksRef.current = runningTasks;
   }, [runningTasks]);
 
-  // 回到页面时恢复所有运行中的任务
-  useEffect(() => {
-    if (!projectId) return;
-    // 检查是否有正在运行的任务需要恢复
-    const restoreRunningTasks = async () => {
-      try {
-        const taskList = await agentApi.listTasks(50, projectId);
-        if (!isMountedRef.current) return;
-        // 找到所有状态为 running 的任务
-        const running = taskList.filter((t) => t.status === "running");
-        if (running.length > 0) {
-          const runningIds = running.map((t) => t.id);
-          setRunningTasks(new Set(runningIds));
-          runningTasksRef.current = new Set(runningIds);
-          // 选中第一个运行中的任务
-          if (!selectedTaskId.current) {
-            selectedTaskId.current = running[0].id;
-            await refreshTaskDetail(running[0].id);
-          }
-        }
-      } catch {
-        // 忽略错误
-      }
-    };
-    // 只有当没有选中任务时才尝试恢复
-    if (!selectedTaskId.current) {
-      restoreRunningTasks();
-    }
-  }, [projectId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // 获取自动化渗透测试开关状态
+  // 获取自动化渗透测试 / SRC 漏洞挖掘开关状态
   useEffect(() => {
     settingsApi
       .get()
-      .then((s) => setAutoPentestEnabled(s.auto_pentest ?? false))
+      .then((s) => {
+        setAutoPentestEnabled(s.auto_pentest ?? false);
+        setSrcHuntingEnabled(s.src_hunting ?? false);
+      })
       .catch(() => {});
   }, []);
 
@@ -651,6 +669,21 @@ export function AgentView() {
       setAutoPentestEnabled(prev);
     } finally {
       setTogglingAutoPentest(false);
+    }
+  };
+
+  // 切换 SRC 漏洞挖掘模式开关
+  const handleToggleSrcHunting = async (enabled: boolean) => {
+    setTogglingSrcHunting(true);
+    const prev = srcHuntingEnabled;
+    setSrcHuntingEnabled(enabled);
+    try {
+      const updated = await settingsApi.update({ src_hunting: enabled });
+      setSrcHuntingEnabled(updated.src_hunting);
+    } catch {
+      setSrcHuntingEnabled(prev);
+    } finally {
+      setTogglingSrcHunting(false);
     }
   };
 
@@ -1299,6 +1332,7 @@ export function AgentView() {
   const handleSelectTask = (taskId: string) => {
     if (selectedTaskId.current === taskId) return;
     selectedTaskId.current = taskId;
+    writeLastViewedTaskId(taskId);
     // 先清空当前任务 + 显示加载动画，让旧消息卸载，避免新旧消息同时渲染导致卡顿
     setSelectedTask(null);
     setTaskLoading(true);
@@ -1306,6 +1340,25 @@ export function AgentView() {
       if (isMountedRef.current) setTaskLoading(false);
     });
   };
+
+  // 恢复中断的自主任务（checkpoint 续跑）；失败提示走任务列表上方的错误条
+  const handleResumeTask = useCallback(
+    async (taskId: string) => {
+      try {
+        await agentApi.resumeTask(taskId);
+        await refreshTasks();
+        // 切到该任务并加载最新进度
+        selectedTaskId.current = taskId;
+        writeLastViewedTaskId(taskId);
+        await refreshTaskDetail(taskId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setDeleteError(`恢复失败: ${msg}`);
+        setTimeout(() => setDeleteError(null), 4000);
+      }
+    },
+    [refreshTaskDetail, refreshTasks]
+  );
 
   // 删除任务
   const handleDeleteTask = useCallback(async (taskId: string) => {
@@ -1315,6 +1368,7 @@ export function AgentView() {
       // 如果删除的是当前选中的任务，清空选中状态
       if (selectedTaskId.current === taskId) {
         selectedTaskId.current = null;
+        writeLastViewedTaskId(null);
         setSelectedTask(null);
       }
       // 清理被删除任务的运行状态和乐观消息
@@ -1344,6 +1398,7 @@ export function AgentView() {
     try {
       const task = await agentChatApi.createConversation(projectId, "");
       selectedTaskId.current = task.id;
+      writeLastViewedTaskId(task.id);
       setInput("");
       await refreshTasks();
       await refreshTaskDetail(task.id);
@@ -1418,8 +1473,10 @@ export function AgentView() {
       }
     }
 
-    // 标记当前任务为运行中
-    setRunningTasks((prev) => new Set(prev).add(taskId));
+    // 标记当前任务为运行中（state + ref 同步，避免 15s 轮询对账读到陈旧 ref 把它移除）
+    const runningSet = new Set(runningTasksRef.current).add(taskId);
+    runningTasksRef.current = runningSet;
+    setRunningTasks(runningSet);
 
     // 创建 AbortController 用于中断请求
     const controller = new AbortController();
@@ -1506,12 +1563,11 @@ export function AgentView() {
       }
     } finally {
       if (isMountedRef.current) {
-        // 移除当前任务的运行状态
-        setRunningTasks((prev) => {
-          const n = new Set(prev);
-          n.delete(taskId);
-          return n;
-        });
+        // 移除当前任务的运行状态（state + ref 同步，避免轮询对账读到陈旧 ref 又加回来）
+        const n = new Set(runningTasksRef.current);
+        n.delete(taskId);
+        runningTasksRef.current = n;
+        setRunningTasks(n);
       }
       abortControllersRef.current.delete(taskId);
     }
@@ -1645,6 +1701,26 @@ export function AgentView() {
               自动化模式
             </span>
           )}
+          {srcHuntingEnabled && (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                marginLeft: 10,
+                padding: "2px 8px",
+                fontSize: 11,
+                fontWeight: 600,
+                borderRadius: 10,
+                background: "rgba(240, 136, 62, 0.15)",
+                color: "var(--accent-orange)",
+                border: "1px solid var(--accent-orange)",
+              }}
+            >
+              <Crosshair size={11} />
+              SRC 漏洞挖掘
+            </span>
+          )}
         </div>
         <div className="agent-chat-actions">
           {/* 模型选择器：根据用户添加的 API Key 选择当前使用的模型 */}
@@ -1697,6 +1773,36 @@ export function AgentView() {
             <Zap size={12} />
             <span style={{ fontSize: 12 }}>
               {togglingAutoPentest ? "..." : autoPentestEnabled ? "自动测试已开" : "自动测试"}
+            </span>
+          </button>
+          {/* SRC 漏洞挖掘模式开关 */}
+          <button
+            className="btn btn-sm"
+            onClick={() => handleToggleSrcHunting(!srcHuntingEnabled)}
+            disabled={togglingSrcHunting}
+            title={
+              srcHuntingEnabled
+                ? "关闭 SRC 漏洞挖掘模式"
+                : "开启 SRC 漏洞挖掘模式（赏金猎人工作流，切换后新任务生效）"
+            }
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: srcHuntingEnabled
+                ? "rgba(240, 136, 62, 0.12)"
+                : "var(--bg-tertiary)",
+              border: srcHuntingEnabled
+                ? "1px solid var(--accent-orange)"
+                : "1px solid var(--border-default)",
+              color: srcHuntingEnabled
+                ? "var(--accent-orange)"
+                : "var(--text-secondary)",
+            }}
+          >
+            <Crosshair size={12} />
+            <span style={{ fontSize: 12 }}>
+              {togglingSrcHunting ? "..." : srcHuntingEnabled ? "SRC 已开" : "SRC 挖掘"}
             </span>
           </button>
           {/* 多 Agent 协作模式开关 */}
@@ -1795,6 +1901,11 @@ export function AgentView() {
                   isRunning={runningTasks.has(task.id)}
                   onClick={() => handleSelectTask(task.id)}
                   onDelete={() => handleDeleteTask(task.id)}
+                  onResume={
+                    task.status === "failed" || task.status === "paused"
+                      ? () => handleResumeTask(task.id)
+                      : undefined
+                  }
                 />
               ))
             )}
@@ -1987,7 +2098,9 @@ export function AgentView() {
                   <EmptyState
                     icon={<Bot size={40} />}
                     message={
-                      autoPentestEnabled
+                      srcHuntingEnabled
+                        ? "输入「挖 xxx.com」或集团名，Agent 按赏金猎人工作流开始挖洞"
+                        : autoPentestEnabled
                         ? "输入「帮我测试 https://xxx.com」即可自动启动安全测试"
                         : "输入消息或测试指令开始..."
                     }
@@ -2142,6 +2255,8 @@ export function AgentView() {
                   placeholder={
                     pendingPreview
                       ? "输入指令（可选），Enter 发送数据包给 AI..."
+                      : srcHuntingEnabled
+                      ? "输入「挖 xxx.com」或集团名开始 SRC 漏洞挖掘... (Enter 发送，Shift+Enter 换行)"
                       : autoPentestEnabled
                       ? "输入「帮我测试 https://xxx.com」即可自动启动安全测试... (Enter 发送，Shift+Enter 换行)"
                       : "输入消息或测试指令... (Enter 发送，Shift+Enter 换行)"
@@ -2194,6 +2309,7 @@ interface TaskListItemProps {
   isRunning: boolean;
   onClick: () => void;
   onDelete: () => void;
+  onResume?: () => void;
 }
 
 function TaskListItem({
@@ -2202,8 +2318,21 @@ function TaskListItem({
   isRunning,
   onClick,
   onDelete,
+  onResume,
 }: TaskListItemProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  const handleResumeClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onResume || resuming) return;
+    setResuming(true);
+    try {
+      await onResume();
+    } finally {
+      setResuming(false);
+    }
+  };
 
   return (
     <div
@@ -2247,6 +2376,26 @@ function TaskListItem({
               })
             : ""}
         </span>
+        {/* 继续按钮：failed/paused 的自主任务可从 checkpoint 续跑 */}
+        {(task.status === "failed" || task.status === "paused") && onResume && (
+          <button
+            style={{
+              background: "var(--bg-tertiary)",
+              color: "var(--accent-blue)",
+              border: "1px solid var(--border-default)",
+              borderRadius: 3,
+              padding: "1px 6px",
+              cursor: resuming ? "wait" : "pointer",
+              fontSize: 10,
+              flexShrink: 0,
+            }}
+            onClick={handleResumeClick}
+            title="从上次进度继续测试（checkpoint 续跑）"
+            disabled={resuming}
+          >
+            {resuming ? "恢复中..." : "继续"}
+          </button>
+        )}
         {/* 删除按钮 */}
         {confirmDelete ? (
           <span

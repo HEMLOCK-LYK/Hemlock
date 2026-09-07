@@ -41,6 +41,7 @@ CONFIGURABLE_KEYS = [
     "upstream_proxy",
     "api_port",
     "auto_pentest",
+    "src_hunting",
     "llm_assisted_verify_enabled",
     "sensitive_op_confirm",
 ]
@@ -109,6 +110,7 @@ class SettingsResponse(BaseModel):
     upstream_proxy: str
     api_port: int
     auto_pentest: bool
+    src_hunting: bool
     llm_assisted_verify_enabled: bool
     sensitive_op_confirm: bool
 
@@ -130,6 +132,7 @@ class SettingsUpdateRequest(BaseModel):
     upstream_proxy: str | None = None
     api_port: int | None = None
     auto_pentest: bool | None = None
+    src_hunting: bool | None = None
     llm_assisted_verify_enabled: bool | None = None
     sensitive_op_confirm: bool | None = None
 
@@ -252,6 +255,7 @@ def _build_settings_response(db: Session | None = None) -> SettingsResponse:
         upstream_proxy=merged.get("upstream_proxy", ""),
         api_port=merged["api_port"],
         auto_pentest=merged.get("auto_pentest", True),
+        src_hunting=merged.get("src_hunting", False),
         llm_assisted_verify_enabled=merged.get("llm_assisted_verify_enabled", False),
         sensitive_op_confirm=merged.get("sensitive_op_confirm", True),
     )

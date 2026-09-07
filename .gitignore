@@ -85,3 +85,6 @@ Thumbs.db
 *.rpm
 *.snap
 !src-tauri/target/release/bundle/nsis/*.exe
+
+# SRC 专属技能包（第三方内容，不入库；打包时进 exe）
+backend/hemlock/data/src_pack/

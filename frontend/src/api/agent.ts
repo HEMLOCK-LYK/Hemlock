@@ -48,6 +48,11 @@ export async function rejectTask(taskId: string): Promise<void> {
   await client.post(`/agent/tasks/${taskId}/reject`);
 }
 
+// 恢复中断的任务（从 checkpoint 续跑，仅自主模式 failed/paused 任务）
+export async function resumeTask(taskId: string): Promise<void> {
+  await client.post(`/agent/tasks/${taskId}/resume`);
+}
+
 // ===== Findings =====
 
 export async function listFindings(
@@ -167,7 +172,13 @@ export const agentChatApi = {
     const { data } = await client.post<ChatResponse>(
       "/agent/chat",
       { task_id, message, provider_id: provider_id || null },
-      { signal }
+      {
+        signal,
+        // 对话模式一轮可能包含多次 LLM 调用与工具执行，耗时不可预估；
+        // 全局 5 分钟超时会让长测试在前端表现为"发送失败/已结束"（后端其实还在跑）。
+        // 这里解除超时，交由后端看门狗与用户"停止"按钮控制。
+        timeout: 0,
+      }
     );
     return data;
   },
@@ -202,5 +213,6 @@ export const agentApi = {
   cancelTask,
   approveTask,
   rejectTask,
+  resumeTask,
   listPresets,
 };

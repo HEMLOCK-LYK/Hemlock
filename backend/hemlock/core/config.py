@@ -84,6 +84,9 @@ class Settings(BaseSettings):
 
     # Agent 模式
     auto_pentest: bool = True  # 一键自动化渗透测试开关
+    # SRC 漏洞挖掘模式开关：开启后注入 SRC 工作流提示词并追加 load_src_doc 工具。
+    # 文档库位于 data/src_pack（独立于 skill 体系，不进前端技能列表）。
+    src_hunting: bool = False
     # LLM 辅助漏洞验证开关（开启后规则验证不确定时调用 LLM 分析，消耗额外 token）
     llm_assisted_verify_enabled: bool = False
     # 敏感操作确认开关（开启后 Agent 执行敏感操作需用户手动批准）

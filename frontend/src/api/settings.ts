@@ -17,6 +17,7 @@ export interface AppSettings {
   api_port: number;
   has_api_key: boolean;
   auto_pentest: boolean;
+  src_hunting: boolean;
   llm_assisted_verify_enabled: boolean;
   sensitive_op_confirm: boolean;
 }

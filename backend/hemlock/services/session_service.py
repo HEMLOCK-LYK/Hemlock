@@ -185,6 +185,7 @@ async def send_request_with_session(
     headers_str: str = "",
     body: str = "",
     follow_redirects: bool = True,
+    use_proxy: bool = False,
 ) -> dict[str, Any]:
     """使用会话状态发送 HTTP 请求。
 
@@ -217,9 +218,28 @@ async def send_request_with_session(
             body = body.replace(f"{{{{{token_name}}}}}", token_value)
             body = body.replace(f"${token_name}", token_value)
 
-    # 使用共享连接池发送请求
-    from hemlock.services.request_service import get_client
-    client = await get_client()
+    # 选择客户端：默认共享直连池；use_proxy=True 经上游代理（一次性客户端）
+    from hemlock.services.request_service import _select_client
+    client, is_temp = await _select_client(use_proxy)
+    try:
+        return await _send_with_client(
+            client, state, method, url, headers_str, body, follow_redirects
+        )
+    finally:
+        if is_temp:
+            await client.aclose()
+
+
+async def _send_with_client(
+    client,
+    state,
+    method: str,
+    url: str,
+    headers_str: str = "",
+    body: str = "",
+    follow_redirects: bool = True,
+) -> dict[str, Any]:
+    """send_request_with_session 主体（client 由调用方注入，此处不管理其生命周期）。"""
     content = body.encode("utf-8") if body else None
 
     # 构建 Request 对象，捕获所有实际发送的头部（含 Host 等自动添加项）

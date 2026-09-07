@@ -98,6 +98,11 @@ async def resume_task(task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="task not found")
     if task.status not in ("failed", "paused"):
         raise HTTPException(status_code=400, detail="仅可恢复 failed/paused 状态的任务")
+    if not task.checkpoint:
+        raise HTTPException(
+            status_code=400,
+            detail="该任务没有可恢复的进度（无 checkpoint）；对话任务请直接发送新消息继续",
+        )
 
     # 从 checkpoint 提取 target_url（恢复时 run() 会加载 PentestContext 快照）
     target_url = ""
