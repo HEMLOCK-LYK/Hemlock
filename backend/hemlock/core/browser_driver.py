@@ -144,7 +144,6 @@ class _BrowserProcess:
             exe,
             f"--remote-debugging-port={port}",
             f"--user-data-dir={_get_profile_dir()}",
-            "--headless=new",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-gpu",
@@ -152,6 +151,10 @@ class _BrowserProcess:
             "--mute-audio",
             "--window-size=1440,900",
         ]
+        # 有头开关：关闭时无头后台运行（默认）；开启时弹出可见窗口，用户可与
+        # Agent 同时操作同一页面（人工过验证码/扫码登录，Agent 接管继续）
+        if not getattr(settings, "browser_headed", False):
+            args.append("--headless=new")
         # 配置了上游代理时浏览器流量跟随（Chrome 对 localhost 默认不代理）
         upstream = (getattr(settings, "upstream_proxy", "") or "").strip()
         if upstream:

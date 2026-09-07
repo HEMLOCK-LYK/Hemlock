@@ -99,6 +99,7 @@ export function Settings() {
   // ===== Agent 安全与验证配置 =====
   const [llmAssistedVerify, setLlmAssistedVerify] = useState(false);
   const [sensitiveOpConfirm, setSensitiveOpConfirm] = useState(true);
+  const [browserHeaded, setBrowserHeaded] = useState(false);
   const [showRiskWarning, setShowRiskWarning] = useState(false);
 
   // ===== 代理设置 =====
@@ -148,6 +149,7 @@ export function Settings() {
         setProviderPowerful(settingsData.llm_provider_powerful || "");
         setLlmAssistedVerify(settingsData.llm_assisted_verify_enabled ?? false);
         setSensitiveOpConfirm(settingsData.sensitive_op_confirm ?? true);
+        setBrowserHeaded(settingsData.browser_headed ?? false);
         setProxyHost(settingsData.proxy_host || "127.0.0.1");
         setProxyPort(settingsData.proxy_port ?? 8080);
         setUpstreamProxy(settingsData.upstream_proxy || "");
@@ -199,6 +201,7 @@ export function Settings() {
       await settingsApi.update({
         llm_assisted_verify_enabled: llmAssistedVerify,
         sensitive_op_confirm: sensitiveOpConfirm,
+        browser_headed: browserHeaded,
       } as Partial<AppSettings>);
       showToast("success", "Agent 配置已保存");
     } catch (err) {
@@ -614,6 +617,43 @@ export function Settings() {
               }}
             >
               {sensitiveOpConfirm ? "已启用" : "已关闭"}
+            </button>
+          </div>
+
+          {/* 浏览器窗口显示开关 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
+                显示浏览器窗口
+              </div>
+              <div className="text-xs text-muted" style={{ maxWidth: 420 }}>
+                开启后，Agent 操作浏览器时弹出可见窗口，可与 Agent 同时操作同一页面（如人工过验证码、扫码登录后由 Agent 接管继续）。关闭时浏览器在后台无头运行。对之后新开的浏览器生效。
+              </div>
+            </div>
+            <button
+              className="btn btn-sm"
+              onClick={() => setBrowserHeaded(!browserHeaded)}
+              style={{
+                background: browserHeaded
+                  ? "rgba(46, 160, 67, 0.12)"
+                  : "rgba(248, 81, 73, 0.12)",
+                border: browserHeaded
+                  ? "1px solid var(--accent-green)"
+                  : "1px solid var(--accent-red)",
+                color: browserHeaded
+                  ? "var(--accent-green)"
+                  : "var(--accent-red)",
+                flexShrink: 0,
+              }}
+            >
+              {browserHeaded ? "已启用" : "已关闭"}
             </button>
           </div>
 

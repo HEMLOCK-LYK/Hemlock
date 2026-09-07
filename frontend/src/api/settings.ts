@@ -20,6 +20,7 @@ export interface AppSettings {
   src_hunting: boolean;
   llm_assisted_verify_enabled: boolean;
   sensitive_op_confirm: boolean;
+  browser_headed: boolean;
 }
 
 // LLM 服务商信息

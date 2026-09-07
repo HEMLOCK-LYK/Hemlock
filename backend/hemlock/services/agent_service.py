@@ -4224,11 +4224,26 @@ class AgentOrchestrator:
             }
         # 加入已加载集合 → 下一轮 LLM 调用的工具数组将包含该组工具
         self.loaded_groups.add(group)
+        message = f"工具组 '{group}' 已加载，现在可以调用：{GROUP_TOOL_LISTS.get(group, '')}"
+        if group == "browser":
+            # 人机协同知情：有头模式下用户看得见浏览器、可随时手动操作
+            if getattr(settings, "browser_headed", False):
+                message += (
+                    "。当前浏览器窗口对用户可见且共用：用户可能已手动登录、过验证码或打开页面，"
+                    "调用前先用 browser_cookies/browser_evaluate 确认当前页面状态；"
+                    "遇到验证码、滑块、扫码登录等无法自动完成的操作时，提示用户在浏览器窗口中手动完成，"
+                    "稍等后继续（不要反复重试触发风控）。"
+                )
+            else:
+                message += (
+                    "。当前为无头模式，用户看不到浏览器。遇到验证码、滑块、扫码登录等无法自动完成的操作时，"
+                    "如实告知用户并停止重试。"
+                )
         return {
             "success": True,
             "group": group,
             "loaded_tools": GROUP_TOOL_LISTS.get(group, ""),
-            "message": f"工具组 '{group}' 已加载，现在可以调用：{GROUP_TOOL_LISTS.get(group, '')}",
+            "message": message,
         }
 
     def _tool_load_src_doc(self, args: dict) -> dict:

@@ -44,6 +44,7 @@ CONFIGURABLE_KEYS = [
     "src_hunting",
     "llm_assisted_verify_enabled",
     "sensitive_op_confirm",
+    "browser_headed",
 ]
 
 # ===== 预设服务商（仅提供 base_url 快捷填充，模型由用户自行输入）=====
@@ -113,6 +114,7 @@ class SettingsResponse(BaseModel):
     src_hunting: bool
     llm_assisted_verify_enabled: bool
     sensitive_op_confirm: bool
+    browser_headed: bool
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -135,6 +137,7 @@ class SettingsUpdateRequest(BaseModel):
     src_hunting: bool | None = None
     llm_assisted_verify_enabled: bool | None = None
     sensitive_op_confirm: bool | None = None
+    browser_headed: bool | None = None
 
 
 class ProviderInfo(BaseModel):
@@ -258,6 +261,7 @@ def _build_settings_response(db: Session | None = None) -> SettingsResponse:
         src_hunting=merged.get("src_hunting", False),
         llm_assisted_verify_enabled=merged.get("llm_assisted_verify_enabled", False),
         sensitive_op_confirm=merged.get("sensitive_op_confirm", True),
+        browser_headed=merged.get("browser_headed", False),
     )
 
 

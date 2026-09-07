@@ -91,6 +91,10 @@ class Settings(BaseSettings):
     llm_assisted_verify_enabled: bool = False
     # 敏感操作确认开关（开启后 Agent 执行敏感操作需用户手动批准）
     sensitive_op_confirm: bool = True
+    # 内置浏览器显示窗口开关：关闭时无头后台运行；开启时弹出可见窗口，
+    # 用户可与 Agent 同时操作同一页面（人工过验证码/扫码登录，Agent 接管继续）。
+    # 对之后新开的浏览器进程生效。
+    browser_headed: bool = False
 
     @property
     def db_url(self) -> str:
