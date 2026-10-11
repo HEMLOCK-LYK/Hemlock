@@ -2,8 +2,8 @@
 
 ## 本版本亮点 / What's New
 
-- **攻击链自动构建 + 画布**：测试过程自动画出「SQL 注入 → 写 webshell → RCE」式危害串联图，独立画布页可拖拽、连线、补节点
-- **跨链总览**：每条链一列瀑布一屏看完，跨链同源流量自动连虚线衔接边，链与链不再孤岛
+- **攻击链自动构建 + 画布**：测试过程自动画出「SQL 注入 → 写 webshell → RCE」式危害串联图，画布横向主线布局（主路径从左到右、分支纵向展开、多路径汇入同一漏洞），可拖拽、连线、补节点
+- **跨链总览**：每条链一条横向泳道一屏看完，跨链同流量 / 同目标自动连虚线衔接，链与链不再孤岛
 - **攻击路径进报告**：确认后的攻击链自动拼进 HTML / Markdown 报告的「攻击路径」段
 - **登录态一键迁移**：流量列表右键把认证头迁给 AI 会话（凭据只进内存），会话失效时 Agent 自动感知、不再对着登录页瞎测
 - **FlowTag 检测化**：敏感信息 / 组件指纹标注检测等级，Agent 按线索定位可疑流量，不再逐包翻
@@ -15,7 +15,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 核心特性
 
-- **攻击链与危害串联**：Agent 的测试操作自动固化为攻击链（资产→漏洞→凭据→动作→获取），画布分层 DAG 可视化、节点拖拽布局、手工连线补依据；跨链总览一屏看完所有链的衔接关系；确认后的链自动进报告
+- **攻击链与危害串联**：Agent 的测试操作自动固化为攻击链（资产→漏洞→凭据→动作→获取），画布横向主线可视化（主干横穿、分支纵向展开）、节点拖拽布局、手工连线补依据；跨链总览一屏看完所有链的衔接关系（同流量 / 同目标）；确认后的链自动进报告
 - **登录态一键迁移**：流量列表右键「迁移认证头到 AI 会话」，凭据只进内存不落盘；会话被踢回登录页时自动标记失效，Agent 不再对着登录页瞎测
 - **FlowTag 轻量检测**：45 条内置规则标注检测等级（Shiro / 云 AK / 私钥 / SQL 报错回显 = high），Agent 按线索定位可疑流量与登录态候选
 - **SRC 漏洞挖掘模式**：橙色开关独立于自动化测试，开启后按赏金猎人节奏工作（种子队列 → 资产确认 → 单站打穿 → 落盘报告），`load_src_doc` 按需加载工作流与漏洞知识库，默认关闭不影响原有模式
@@ -58,7 +58,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Key Features
 
-- **Attack Chain & Impact Storytelling**: the Agent's operations are automatically compiled into an attack chain (asset → vuln → credential → action → loot); layered-DAG canvas with drag-and-drop layout and manual edges; cross-chain overview connects nodes sharing the same source traffic; confirmed chains are appended into HTML/Markdown reports as an "Attack Path" section
+- **Attack Chain & Impact Storytelling**: the Agent's operations are automatically compiled into an attack chain (asset → vuln → credential → action → loot); horizontal main-path canvas (longest path left→right, branches fanning vertically, multiple paths converging into the same vuln) with drag-and-drop layout and manual edges; cross-chain overview links chains sharing the same source traffic or target; confirmed chains are appended into HTML/Markdown reports as an "Attack Path" section
 - **One-Click Session Migration**: right-click a flow to migrate its auth headers into the AI session (credentials in memory only); when the session gets kicked back to a login page the Agent is told and stops testing a dead session
 - **FlowTag Lightweight Detection**: 45 built-in rules graded by severity (Shiro / cloud AK / private key / SQL error echo = high); the Agent locates suspicious traffic by clues instead of packet-by-packet review
 - **SRC Bug-Bounty Hunting Mode**: an independent toggle on the AI testing page — the Agent hunts with a bug-bounty workflow (seed queue → asset confirmation → per-host full coverage → immediate reporting on medium+ findings), with an on-demand document library (`load_src_doc`) covering workflow rules and 30+ vulnerability playbooks; off by default, existing test modes unaffected
