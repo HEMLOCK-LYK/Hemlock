@@ -1748,7 +1748,7 @@ textarea {
 .agent-chat-toolcard {
   align-self: flex-start;
   width: 88%;
-  min-height: 0;   /* flex 列中允许收缩，配合内部滚动 */
+  flex-shrink: 0;  /* 消息列超高靠容器滚动，绝不允许 flex 把卡片压扁成横线 */
   border: 1px solid var(--border-default);
   border-left: 3px solid var(--accent-purple);
   border-radius: var(--radius-md);
@@ -3289,8 +3289,9 @@ textarea {
 
 .ac-hint {
   position: absolute;
-  bottom: 8px;
-  left: 12px;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
   font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-secondary);
@@ -3299,16 +3300,18 @@ textarea {
   padding: 3px 8px;
   pointer-events: none;
   z-index: 5;
+  white-space: nowrap;
 }
 
-/* 节点卡片：五类型配色（asset 灰 / vuln 红 / credential 橙 / action 蓝 / loot 绿） */
+/* 节点卡片：五类型配色（asset 灰 / vuln 红 / credential 橙 / action 蓝 / loot 绿），
+   左色条 + 整卡类型晕染 + 实心类型药丸三重区分——缩小后也能靠色块一眼辨类型 */
 .ac-node {
-  width: 200px;
+  width: 220px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-default);
-  border-left: 3px solid var(--text-muted);
+  border-left: 4px solid var(--text-muted);
   border-radius: var(--radius-md);
-  padding: 7px 10px;
+  padding: 8px 10px;
   font-size: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
@@ -3316,24 +3319,56 @@ textarea {
   border-color: var(--accent-blue);
   border-left-color: var(--accent-blue) !important;
 }
-.ac-node.asset { border-left-color: var(--text-muted); }
-.ac-node.vuln { border-left-color: var(--accent-red); }
-.ac-node.credential { border-left-color: var(--accent-orange); }
-.ac-node.action { border-left-color: var(--accent-blue); }
-.ac-node.loot { border-left-color: var(--accent-green); }
+.ac-node.asset {
+  border-left-color: var(--text-muted);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--text-muted) 10%, var(--bg-secondary)), var(--bg-secondary) 62%);
+}
+.ac-node.vuln {
+  border-left-color: var(--accent-red);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-red) 13%, var(--bg-secondary)), var(--bg-secondary) 62%);
+}
+.ac-node.credential {
+  border-left-color: var(--accent-orange);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-orange) 13%, var(--bg-secondary)), var(--bg-secondary) 62%);
+}
+.ac-node.action {
+  border-left-color: var(--accent-blue);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-blue) 13%, var(--bg-secondary)), var(--bg-secondary) 62%);
+}
+.ac-node.loot {
+  border-left-color: var(--accent-green);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-green) 13%, var(--bg-secondary)), var(--bg-secondary) 62%);
+}
 
+/* 类型徽标：实心药丸，类型色即底色 */
 .ac-node-type {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   font-size: 10px;
-  color: var(--text-muted);
-  margin-bottom: 3px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: #fff;
+  background: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-bottom: 4px;
 }
-.ac-node.vuln .ac-node-type { color: var(--accent-red); }
-.ac-node.credential .ac-node-type { color: var(--accent-orange); }
-.ac-node.action .ac-node-type { color: var(--accent-blue); }
-.ac-node.loot .ac-node-type { color: var(--accent-green); }
+.ac-node.asset .ac-node-type { background: var(--text-muted); }
+.ac-node.vuln .ac-node-type { background: var(--accent-red); }
+.ac-node.credential .ac-node-type { background: var(--accent-orange); }
+.ac-node.action .ac-node-type { background: var(--accent-blue); }
+.ac-node.loot .ac-node-type { background: var(--accent-green); }
+
+/* 药丸内的 severity 徽章：白字半透明底，避免红底配红字 */
+.ac-node-type .ac-node-sev {
+  margin-left: 2px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.24);
+  border: none;
+  border-radius: 999px;
+  padding: 1px 5px;
+}
 
 .ac-node-title {
   color: var(--text-primary);
@@ -3343,6 +3378,17 @@ textarea {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* 目标摘要行（host + path） */
+.ac-node-target {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
 }
 
 .ac-node-flow {
@@ -3519,4 +3565,40 @@ textarea {
   color: var(--text-muted);
   margin-left: auto;
   white-space: nowrap;
+}
+
+/* ===== 攻击链画布：图例 + 小地图 ===== */
+.ac-legend {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ac-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ac-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.ac-legend-item.asset { color: var(--text-secondary); }
+.ac-legend-item.vuln { color: var(--accent-red); }
+.ac-legend-item.credential { color: var(--accent-orange); }
+.ac-legend-item.action { color: var(--accent-blue); }
+.ac-legend-item.loot { color: var(--accent-green); }
+
+.ac-minimap {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
 }
