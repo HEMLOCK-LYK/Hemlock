@@ -16,7 +16,9 @@ from hemlock.models.finding import Finding
 from hemlock.models.evidence import Evidence
 from hemlock.models.task import Task
 from hemlock.models.flow import Flow
+from hemlock.models.attack_chain import AttackChain
 from hemlock.core.config import settings
+from hemlock.services.attack_chain_builder import export_chain_markdown, get_chain_nodes
 
 
 # 严重程度排序
@@ -85,12 +87,105 @@ def generate_report(
     # 统计
     stats = _calculate_stats(findings)
 
+    # 已确认攻击链（危害串联叙事）：任务报告取该任务的链，项目报告取项目下全部
+    chains = _collect_confirmed_chains(db, project_id, task_id)
+
     if fmt == "json":
         return _generate_json(finding_details, stats, tasks)
     elif fmt == "markdown":
-        return _generate_markdown(finding_details, stats, tasks)
+        return _generate_markdown(finding_details, stats, tasks, chains, db)
     else:
-        return _generate_html(finding_details, stats, tasks)
+        return _generate_html(finding_details, stats, tasks, chains, db)
+
+
+def _collect_confirmed_chains(
+    db: Session, project_id: str | None, task_id: str | None
+) -> list[AttackChain]:
+    """报告关联的 confirmed 攻击链；无范围（既无 task 也无 project）不取，避免全库倾泻。"""
+    if not task_id and not project_id:
+        return []
+    query = db.query(AttackChain).filter(AttackChain.status == "confirmed")
+    if task_id:
+        query = query.filter(AttackChain.task_id == task_id)
+    else:
+        query = query.filter(AttackChain.project_id == project_id)
+    return query.order_by(AttackChain.updated_at.asc()).all()
+
+
+def _chain_edge_map(chain: AttackChain) -> dict[tuple[str, str], str]:
+    """解析链 edges JSON → {(from, to): label}，只用于相邻节点间的箭头标注。"""
+    try:
+        edges = json.loads(chain.edges) if chain.edges else []
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    for e in edges if isinstance(edges, list) else []:
+        if isinstance(e, dict) and e.get("from") and e.get("to"):
+            out[(e["from"], e["to"])] = str(e.get("label") or "")
+    return out
+
+
+_CHAIN_TYPE_LABEL = {
+    "asset": "资产",
+    "vuln": "漏洞",
+    "credential": "凭据",
+    "action": "动作",
+    "loot": "获取",
+}
+_CHAIN_TYPE_COLOR = {
+    "asset": "#6b7280",
+    "vuln": "#dc2626",
+    "credential": "#ea580c",
+    "action": "#2563eb",
+    "loot": "#16a34a",
+}
+
+
+def _chains_html(db: Session, chains: list[AttackChain]) -> str:
+    """攻击路径 HTML 段：每条 confirmed 链一张卡，节点按主干顺序 + 相邻箭头带边标签。"""
+    if not chains:
+        return ""
+    blocks = []
+    for chain in chains:
+        nodes = get_chain_nodes(db, chain.id)
+        if not nodes:
+            continue
+        edge_map = _chain_edge_map(chain)
+        steps = []
+        for i, node in enumerate(nodes):
+            color = _CHAIN_TYPE_COLOR.get(node.node_type, "#6b7280")
+            label = _CHAIN_TYPE_LABEL.get(node.node_type, node.node_type)
+            sub_parts = []
+            if node.detail:
+                try:
+                    d = json.loads(node.detail)
+                    if isinstance(d, dict):
+                        sub_parts.append(
+                            "  ".join(f"{k}={v}" for k, v in d.items() if v not in ("", None))
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if node.flow_id:
+                sub_parts.append(f"证据流量: {node.flow_id}")
+            sub = f'<div class="chain-step-sub">{_escape_html("  ".join(sub_parts))}</div>' if sub_parts else ""
+            steps.append(
+                f'<div class="chain-step">'
+                f'<div class="chain-step-head">'
+                f'<span class="chain-step-type" style="color: {color}; border-color: {color};">{label}</span>'
+                f'<span class="chain-step-title">{_escape_html(node.title or "（无标题）")}</span>'
+                f'</div>{sub}</div>'
+            )
+            if i + 1 < len(nodes):
+                elabel = edge_map.get((node.id, nodes[i + 1].id), "")
+                arrow = f'↓ {_escape_html(elabel)}' if elabel else "↓"
+                steps.append(f'<div class="chain-arrow">{arrow}</div>')
+        blocks.append(
+            f'<div class="chain-card"><div class="chain-name">{_escape_html(chain.name or "未命名链")}</div>'
+            f'{"".join(steps)}</div>'
+        )
+    if not blocks:
+        return ""
+    return f'<section class="chains"><h2>攻击路径</h2>{"".join(blocks)}</section>'
 
 
 def _calculate_stats(findings: list[Finding]) -> dict:
@@ -161,6 +256,8 @@ def _generate_markdown(
     finding_details: list[dict],
     stats: dict,
     tasks: list[Task],
+    chains: list[AttackChain],
+    db: Session,
 ) -> str:
     """生成 Markdown 格式报告。"""
     lines = [
@@ -197,6 +294,13 @@ def _generate_markdown(
                 lines.append(f"- 开始时间: {t.started_at.strftime('%Y-%m-%d %H:%M:%S')}")
             if t.ended_at:
                 lines.append(f"- 结束时间: {t.ended_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            lines.append("")
+
+    # 攻击路径（confirmed 链）：放在任务之后、漏洞详情之前，先讲危害串联叙事
+    if chains:
+        lines.append("")
+        for chain in chains:
+            lines.append(export_chain_markdown(db, chain))
             lines.append("")
 
     # 按严重程度排序
@@ -261,6 +365,8 @@ def _generate_html(
     finding_details: list[dict],
     stats: dict,
     tasks: list[Task],
+    chains: list[AttackChain],
+    db: Session,
 ) -> str:
     """生成 HTML 格式报告。"""
     sorted_details = sorted(
@@ -326,6 +432,8 @@ def _generate_html(
             </table>
         </section>"""
 
+    chains_html = _chains_html(db, chains)
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -386,6 +494,20 @@ def _generate_html(
             max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
         }}
         footer {{ text-align: center; color: #9ca3af; font-size: 12px; margin-top: 40px; }}
+        .chain-card {{
+            background: white; border-radius: 8px; padding: 20px; margin-bottom: 16px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }}
+        .chain-name {{ font-weight: 700; margin-bottom: 10px; }}
+        .chain-step {{ padding: 4px 0 4px 10px; border-left: 2px solid #e5e7eb; }}
+        .chain-step-head {{ display: flex; align-items: center; gap: 8px; }}
+        .chain-step-type {{
+            font-size: 11px; font-weight: 600; border: 1px solid; border-radius: 4px;
+            padding: 1px 6px; white-space: nowrap;
+        }}
+        .chain-step-title {{ font-size: 14px; font-weight: 500; }}
+        .chain-step-sub {{ font-size: 12px; color: #6b7280; margin-top: 2px; word-break: break-all; }}
+        .chain-arrow {{ color: #9ca3af; font-size: 12px; padding: 2px 0 2px 18px; }}
     </style>
 </head>
 <body>
@@ -404,6 +526,8 @@ def _generate_html(
     </div>
 
     {tasks_html}
+
+    {chains_html}
 
     <section class="findings">
         <h2>漏洞详情 ({stats['total']} 个)</h2>

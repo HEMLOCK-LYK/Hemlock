@@ -18,6 +18,7 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,17 +38,26 @@ SAFETY_MARGIN_TOKENS = 2000
 # 单条工具结果蒸馏阈值（字符数）：超过此值才蒸馏，短结果保留原文
 DISTILL_THRESHOLD_CHARS = 500
 
-# 中文/英文混合文本的近似字符/token 比率
+# 非 CJK 文本（ASCII/代码/JSON）的近似字符/token 比率。
+# CJK 部分单独按 1.5 字符/token 计（见 TokenEstimator.estimate 的分段估算）。
 CHARS_PER_TOKEN = 3.5
 
 
 # ===== Token 估算器 =====
 
+# CJK 字符（汉字 + 中文标点 + 全角符号）：~1.5 字符/token
+# 其余（ASCII/代码/JSON/base64）：~3.5 字符/token。
+# 分段计价比旧版 3.5 一刀切更接近真实消耗——压缩后的 JS/HTML/JSON 与中文
+# 混排时，旧版会低估 20-30%，导致压缩触发过晚、顶到真实窗口。
+# 方向选择"宁高勿低"：高估只是提前压缩，低估会撑爆上下文。
+_CJK_CHAR_RE = re.compile(r"[㐀-䶿一-鿿　-〿＀-￯]")
+
+
 class TokenEstimator:
     """本地 Token 估算器：使用字符数近似，无需 tiktoken 依赖。
 
-    经验值：英文 ~4 字符/token，中文 ~1.5 字符/token，混合 ~3.5 字符/token。
-    在预算管理场景下精度足够（误差 ±20% 在可接受范围内）。
+    经验值：英文/代码 ~3.5-4 字符/token，中文 ~1.5 字符/token。
+    按 CJK 与非 CJK 分段估算，在预算管理场景下精度足够（误差 ±15%）。
     """
 
     @staticmethod
@@ -55,7 +65,9 @@ class TokenEstimator:
         """估算单段文本的 token 数。"""
         if not text:
             return 0
-        return max(1, int(len(text) / CHARS_PER_TOKEN))
+        cjk = len(_CJK_CHAR_RE.findall(text))
+        other = len(text) - cjk
+        return max(1, int(cjk / 1.5 + other / CHARS_PER_TOKEN))
 
     @staticmethod
     def estimate_messages(messages: list[dict]) -> int:
@@ -107,9 +119,9 @@ class ToolOutputDistiller:
     # 可蒸馏的工具列表（一次性消费型，输出大且旧后无用）
     DISTILLABLE_TOOLS = frozenset({
         "send_request", "send_session_request", "send_raw_request",
-        "analyze_flow", "get_flow_detail", "quick_test_param",
+        "analyze_flow", "quick_test_param",
         "run_intruder", "generate_payloads", "get_payload_list",
-        "read_file", "call_api", "authenticate",
+        "call_api", "authenticate",
         "verify_vulnerability", "compare_responses",
         "encode_decode", "run_request_chain",
     })
@@ -117,6 +129,10 @@ class ToolOutputDistiller:
     # 不蒸馏的工具（输出本身就是摘要或关键信息，蒸馏会丢失 Agent 必需的数据）
     # 注：run_script/run_command 的 stdout 是执行目的，蒸馏成 "[tool] N items, XXXB" 会让 Agent 看不到输出
     #     cve_lookup/web_search 的结构化结果（CVE 列表/搜索条目）被蒸馏成计数会失去意义
+    #     read_file 是「读回全文」的工具：结果被蒸馏成一行 = Agent 白读 → 不得不再读一次，
+    #     同一份数据二次注入上下文（token + 缓存推进双重浪费）。它自带 100KB 上限 +
+    #     offset/limit 分页，run_command 超长输出落盘后的「用 read_file 分页读取」链路依赖它透传
+    #     get_flow_detail 是表单工具（元数据 + 短预览 + 字段长度），蒸馏反而把表单抹成一行计数
     NON_DISTILLABLE_TOOLS = frozenset({
         "report_finding", "list_reported_findings",
         "get_test_coverage", "get_strategy",
@@ -124,6 +140,7 @@ class ToolOutputDistiller:
         "send_to_repeater",
         "run_script", "run_command",
         "cve_lookup", "web_search",
+        "read_file", "get_flow_detail",
     })
 
     @classmethod

@@ -1616,12 +1616,15 @@ textarea {
   grid-template-rows: auto 1fr;
 }
 .agent-chat-thinking.thinking-done {
-  opacity: 0.6;
   transition: opacity 0.2s ease, grid-template-rows 0.25s var(--ease-out-quart);
 }
-.agent-chat-thinking.thinking-done:hover { opacity: 1; }
+/* 完成态只在折叠时降透明度；展开阅读时保持正常对比度（不自动折叠后用户会直接读内容） */
+.agent-chat-thinking.thinking-done:not(.expanded) {
+  opacity: 0.6;
+}
+.agent-chat-thinking.thinking-done:not(.expanded):hover { opacity: 1; }
 /* 折叠后的已完成思考块更紧凑：缩小头部高度，让一屏能容纳更多内容 */
-.agent-chat-thinking.thinking-done .agent-chat-thinking-header {
+.agent-chat-thinking.thinking-done:not(.expanded) .agent-chat-thinking-header {
   padding: 3px 12px;
   min-height: 24px;
 }
@@ -1788,7 +1791,6 @@ textarea {
 .agent-chat-toolcard-chevron {
   color: var(--text-muted);
   flex-shrink: 0;
-  margin-left: auto;
 }
 .agent-chat-toolcard-body {
   padding: 8px 10px;
@@ -1828,12 +1830,12 @@ textarea {
   color: var(--text-secondary);
   overflow-x: auto;
 }
-.agent-chat-toolcard-time {
-  padding: 3px 10px;
+/* 时间并入头部（原独立底部条在折叠卡片下像一条奇怪的横线，已移除） */
+.agent-chat-toolcard-time-inline {
+  margin-left: auto;
   font-size: 10px;
   color: var(--text-muted);
-  text-align: right;
-  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
 }
 
 /* ===== 子 Agent 卡片（spawn_subagent 嵌套展示） ===== */
@@ -3248,4 +3250,273 @@ textarea {
 .btn-outline-danger:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ===== 攻击链画布 ===== */
+.ac-chain-select {
+  width: 280px;
+  height: 26px;
+  padding: 2px 8px;
+}
+
+.ac-status-badge {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+.ac-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ac-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.ac-canvas {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.ac-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* 节点卡片：五类型配色（asset 灰 / vuln 红 / credential 橙 / action 蓝 / loot 绿） */
+.ac-node {
+  width: 200px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-md);
+  padding: 7px 10px;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+.ac-node.selected {
+  border-color: var(--accent-blue);
+  border-left-color: var(--accent-blue) !important;
+}
+.ac-node.asset { border-left-color: var(--text-muted); }
+.ac-node.vuln { border-left-color: var(--accent-red); }
+.ac-node.credential { border-left-color: var(--accent-orange); }
+.ac-node.action { border-left-color: var(--accent-blue); }
+.ac-node.loot { border-left-color: var(--accent-green); }
+
+.ac-node-type {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+.ac-node.vuln .ac-node-type { color: var(--accent-red); }
+.ac-node.credential .ac-node-type { color: var(--accent-orange); }
+.ac-node.action .ac-node-type { color: var(--accent-blue); }
+.ac-node.loot .ac-node-type { color: var(--accent-green); }
+
+.ac-node-title {
+  color: var(--text-primary);
+  line-height: 1.4;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ac-node-flow {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* 节点详情抽屉 */
+.ac-drawer {
+  width: 320px;
+  min-width: 320px;
+  border-left: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ac-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-default);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ac-drawer-close {
+  color: var(--text-muted);
+  display: flex;
+}
+.ac-drawer-close:hover {
+  color: var(--text-primary);
+}
+
+.ac-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.ac-drawer-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+
+.ac-drawer-section {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+  margin-bottom: 10px;
+}
+
+.ac-drawer-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.ac-drawer-kv {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 12px;
+  align-items: baseline;
+}
+
+.ac-drawer-key {
+  color: var(--text-muted);
+  white-space: nowrap;
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.ac-drawer-value {
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.ac-flow-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-link);
+  font-size: 12px;
+}
+.ac-flow-link:hover {
+  text-decoration: underline;
+}
+
+.ac-drawer-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+  line-height: 1.6;
+}
+
+/* 攻击链节点 severity 徽章（vuln 节点） */
+.ac-node-sev {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+}
+.ac-node-sev.critical,
+.ac-node-sev.high { color: var(--accent-red); }
+.ac-node-sev.medium { color: var(--accent-orange); }
+.ac-node-sev.low { color: var(--accent-yellow); }
+
+/* ===== 攻击链：单链/总览模式切换 ===== */
+.ac-mode-toggle {
+  display: flex;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.ac-mode-toggle button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+.ac-mode-toggle button + button {
+  border-left: 1px solid var(--border-default);
+}
+.ac-mode-toggle button.active {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+/* ===== 攻击链总览：链名标签节点（点击进入单链编辑） ===== */
+.ac-chain-label {
+  width: 200px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+.ac-chain-label:hover {
+  border-color: var(--accent-blue);
+}
+.ac-chain-label-name {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-chain-label-status {
+  font-size: 10px;
+  white-space: nowrap;
+}
+.ac-chain-label-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
 }

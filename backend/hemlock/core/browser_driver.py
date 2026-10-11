@@ -130,7 +130,7 @@ class _BrowserProcess:
     @staticmethod
     async def _is_cdp_alive(port: int) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=0.4) as client:
+            async with httpx.AsyncClient(timeout=0.4, trust_env=False) as client:
                 resp = await client.get(f"http://127.0.0.1:{port}/json/version")
                 return resp.status_code == 200 and "webSocketDebuggerUrl" in resp.text
         except Exception:
@@ -206,7 +206,7 @@ class BrowserSession:
         """新建标签页，返回其 WebSocket 调试地址（Chrome 110+ 用 PUT，失败回退 GET）。"""
         port = await _BROWSER.ensure()
         base = f"http://127.0.0.1:{port}"
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
             resp = await client.put(f"{base}/json/new?about:blank")
             if resp.status_code != 200:
                 resp = await client.get(f"{base}/json/new?about:blank")

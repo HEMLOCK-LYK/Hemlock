@@ -27,6 +27,9 @@ class SessionState:
     authenticated: bool = False
     login_url: str = ""
     history: list[dict] = field(default_factory=list)  # 请求历史摘要
+    # 登录态迁移（设计稿 docs/login-migration-design.md）
+    stale: bool = False          # 登录态疑似失效（30x 跳登录 / 401 / 登录页特征）
+    migrated_from: str = ""      # 迁移来源（如 "flow:flw_xxx"）；空 = 非迁移会话
 
 
 class SessionManager:
@@ -385,6 +388,150 @@ async def authenticate(
         "req_headers": result.get("req_headers", headers),
         "duration_ms": result.get("duration_ms"),
     }
+
+
+# ===== 登录态一键迁移（设计稿 docs/login-migration-design.md 第一期）=====
+#
+# 安全边界（设计稿 §7 写死）：
+# - 凭据只进 session_manager 内存：不写 task.steps、不进上下文压缩摘要、
+#   不进任何记忆/技能/日志/数据库
+# - 函数返回值只报告「迁移了什么形态」（形态 + 数量），绝不回显完整凭据
+# - 只读 Flow 已抓到的请求头，不发起额外抓取
+
+# 显式 token 头（Authorization / Cookie 之外的兜底识别）
+_TOKEN_HEADER_NAMES = ("x-auth-token", "x-api-key", "x-token", "api-key", "x-access-token")
+
+# 登录页特征：几乎必有密码输入框（误报率最低的单特征）
+_LOGIN_PAGE_PATTERN = re.compile(r"<input[^>]+type=[\"']?password", re.IGNORECASE)
+
+
+def looks_like_login_page(status: int, location: str = "", body_head: str = "") -> bool:
+    """判断响应是否疑似「被踢回登录页」（迁移验证与被动 stale 检测共用）。"""
+    if status in (401, 403):
+        return True
+    if 300 <= status < 400 and re.search(r"(?i)login|signin|sign-in|auth", location or ""):
+        return True
+    if body_head and _LOGIN_PAGE_PATTERN.search(body_head):
+        return True
+    return False
+
+
+def parse_auth_from_flow(flow) -> dict:
+    """从流量请求头解析认证信息。收集全部形态，注入优先级写死：
+    Authorization > Cookie > 显式 token 头（设计稿 §9）。
+
+    只解析不注入——调用方决定写入哪个会话。
+    """
+    headers = _parse_headers(flow.req_headers or "")
+    parsed = {
+        "auth_header": "",       # Authorization 头完整值
+        "cookie": "",            # Cookie 头完整串
+        "token_headers": {},     # 显式 token 头 {name: value}
+    }
+    for name, value in headers.items():
+        lower = name.lower()
+        if lower == "authorization":
+            parsed["auth_header"] = value
+        elif lower == "cookie":
+            parsed["cookie"] = value
+        elif lower in _TOKEN_HEADER_NAMES:
+            parsed["token_headers"][name] = value
+    return parsed
+
+
+def _parse_cookie_string(cookie_str: str) -> dict[str, str]:
+    """解析 Cookie 请求头串（"k1=v1; k2=v2"）为 dict。
+
+    值保持原样（不 unquote）——浏览器发回什么样就存什么样，
+    引号/转义是站点语义，转发时必须逐字节忠实。
+    """
+    cookies: dict[str, str] = {}
+    for part in (cookie_str or "").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        k = k.strip()
+        if k:
+            cookies[k] = v.strip()
+    return cookies
+
+
+def migrate_flow_auth_to_session(flow, session_id: str) -> dict:
+    """来源 B：把流量请求头中的认证信息迁移到 Agent 会话（内存态）。
+
+    返回值不回显完整凭据，只报告形态与数量，供前端 toast 展示。
+    """
+    parsed = parse_auth_from_flow(flow)
+    if not (parsed["auth_header"] or parsed["cookie"] or parsed["token_headers"]):
+        return {
+            "migrated": False,
+            "error": "该流量请求头中未发现认证信息（Authorization / Cookie / token 头）",
+            "hint": "请选择登录之后抓到的流量；或等第二期的浏览器导入方式",
+        }
+
+    state = session_manager.get_session(session_id) or session_manager.create_session(session_id)
+    injected: list[str] = []
+    # 注入优先级（写死）：Authorization > Cookie > 显式 token 头
+    if parsed["auth_header"]:
+        state.headers["Authorization"] = parsed["auth_header"]
+        injected.append("Authorization")
+    if parsed["cookie"]:
+        cookies = _parse_cookie_string(parsed["cookie"])
+        state.cookies.update(cookies)
+        injected.append(f"Cookie({len(cookies)} 项)")
+    for name, value in parsed["token_headers"].items():
+        state.headers[name] = value
+        injected.append(name)
+
+    state.authenticated = True
+    state.stale = False
+    state.migrated_from = f"flow:{flow.id}"
+
+    return {
+        "migrated": True,
+        "session_id": session_id,
+        "flow_id": flow.id,
+        "host": flow.host or "",
+        "injected": injected,
+        "migrated_from": state.migrated_from,
+    }
+
+
+async def validate_migrated_session(session_id: str, probe_url: str) -> dict:
+    """迁移完成后立即主动探测：轻量 GET 一次，判断登录态是否有效。
+
+    判定与被动 stale 检测共用 looks_like_login_page。
+    返回 {"valid": bool, "status": int, "reason": str}，不回显凭据。
+    """
+    try:
+        resp = await send_request_with_session(
+            session_id=session_id,
+            method="GET",
+            url=probe_url,
+            follow_redirects=False,  # 跳转本身是判定依据，不能跟随
+        )
+    except Exception as e:
+        return {"valid": None, "status": 0, "reason": f"探测请求失败: {e}"}
+
+    status = resp.get("status", 0)
+    location = ""
+    for line in (resp.get("headers") or "").splitlines():
+        if line.lower().startswith("location:"):
+            location = line.split(":", 1)[1].strip()
+            break
+    stale = looks_like_login_page(status, location, (resp.get("body") or "")[:3000])
+    state = session_manager.get_session(session_id)
+    if state and stale:
+        state.stale = True
+
+    reason = (
+        "401/403 未授权" if status in (401, 403)
+        else f"30x 跳转到 {location or '登录相关地址'}" if (300 <= status < 400 and location)
+        else "响应疑似登录页（含密码输入框）" if stale
+        else f"HTTP {status}，未见登录页特征"
+    )
+    return {"valid": not stale, "status": status, "reason": reason}
 
 
 def set_session_header(session_id: str, header_name: str, header_value: str) -> dict:

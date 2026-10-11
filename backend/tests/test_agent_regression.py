@@ -242,11 +242,11 @@ def test_micro_compact_preserves_flow_id(tmp_path, monkeypatch):
     """微压缩：工具级截断的结果透传保留 flow_id；超大结果才蒸馏。"""
     from hemlock.services.agent_service import _tool_result_to_llm_content
 
-    # 5KB 级别结果（工具级截断后）→ 透传，保留 flow_id 与 body 预览
+    # ~8KB 级别结果（body 预览 _FLOW_BODY_PREVIEW=8000 截断后）→ 透传，保留 flow_id 与 body 预览
     medium = {
         "flow_id": "flw_regression",
         "status": 200,
-        "body": "X" * 3000,
+        "body": "X" * 8000,
         "headers": "Content-Type: text/html",
         "url": "http://x/a",
     }

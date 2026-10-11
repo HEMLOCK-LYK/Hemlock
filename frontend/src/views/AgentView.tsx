@@ -88,7 +88,7 @@ interface ParsedMessage {
   id: string;
   role: "user" | "assistant" | "system" | "tool_call" | "thinking" | "subagent";
   content: string;
-  tool?: { tool: string; args: unknown; result: unknown };
+  tool?: { tool: string; args: unknown; result: unknown; live_output?: string };
   subagent?: SubagentInfo;
   timestamp: string;
   streaming?: boolean; // 标记是否正在流式输出
@@ -98,6 +98,8 @@ interface ToolInfo {
   tool: string;
   args: unknown;
   result: unknown;
+  /** run_command 执行期间的流式输出（command_output 事件累积） */
+  live_output?: string;
 }
 
 interface SubagentToolCall {
@@ -360,6 +362,13 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
       continue;
     }
 
+    // 泄漏到子 Agent 组之外的独立 tool_result 步骤没有可展示内容，
+    // 渲染出来会是一具空的虚线胶囊（看起来像一条奇怪的横线），直接跳过
+    if (step.type === "tool_result") {
+      i += 1;
+      continue;
+    }
+
     let role: ParsedMessage["role"] = "system";
     if (step.type === "user_message" || step.type === "user") {
       role = "user";
@@ -376,10 +385,17 @@ function stepsToMessages(steps: StepData[]): ParsedMessage[] {
     }
 
     const d = parseStepData(step.data);
+    // system 类步骤解析不出文本时（无法识别的类型/空数据）不渲染，
+    // 避免留下空胶囊；user/assistant 空内容同样没有意义
+    const text = d.text ?? "";
+    if (!text.trim()) {
+      i += 1;
+      continue;
+    }
     result.push({
       id: `step-${i}`,
       role,
-      content: d.text ?? "",
+      content: text,
       timestamp: step.timestamp,
     });
     i += 1;
@@ -427,6 +443,15 @@ function summarizeResult(result: unknown): string {
   if (obj.findings && Array.isArray(obj.findings))
     return `发现 ${obj.findings.length} 个漏洞`;
   return "";
+}
+
+/** 结果摘要为空时用参数兜底（URL / 路径 / 命令等），让折叠的卡片一眼可读 */
+function summarizeArgs(args: unknown): string {
+  if (args == null || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+  const v = a.url ?? a.login_url ?? a.path ?? a.command ?? a.query ?? a.skill ?? a.name ?? a.goal;
+  if (typeof v !== "string" || !v) return "";
+  return v.length > 50 ? v.slice(0, 50) + "…" : v;
 }
 
 /** 将结果文本中的 flow_id 渲染为可点击链接 */
@@ -537,6 +562,10 @@ export function AgentView() {
   const subagentThinkingBufferRef = useRef<Map<string, string>>(new Map());
   // 子 Agent 思考链定时器 ID
   const subagentThinkingRafRef = useRef<number | null>(null);
+  // 命令输出流式缓冲区（taskId -> 累积的 delta，150ms 批量刷入工具卡片）
+  const commandOutputBufferRef = useRef<Map<string, string>>(new Map());
+  // 命令输出流式定时器 ID
+  const commandOutputRafRef = useRef<number | null>(null);
 
   const projectId = currentProject?.id ?? null;
 
@@ -918,6 +947,38 @@ export function AgentView() {
     });
   }, []);
 
+  // 定时批量刷新命令输出 delta：追加到当前执行中的 run_command 工具卡片
+  // （对齐 Claude Code 终端实时输出；result 到达后卡片不再匹配，流式自然停止）
+  const flushCommandOutputs = useCallback(() => {
+    commandOutputRafRef.current = null;
+    const buffer = commandOutputBufferRef.current;
+    if (buffer.size === 0) return;
+
+    const entries = Array.from(buffer.entries());
+    buffer.clear();
+
+    setOptimisticByTask((prev) => {
+      let updated = prev;
+      for (const [taskId, delta] of entries) {
+        const msgs = updated[taskId] ?? [];
+        // 从后往前找最后一个仍在执行（result 为 null）的 run_command 卡片
+        const idx = [...msgs].reverse().findIndex(
+          (m) => m.role === "tool_call" && m.tool?.tool === "run_command" && m.tool.result === null
+        );
+        if (idx === -1) continue;
+        const realIdx = msgs.length - 1 - idx;
+        const newMsgs = [...msgs];
+        const tool = newMsgs[realIdx].tool!;
+        newMsgs[realIdx] = {
+          ...newMsgs[realIdx],
+          tool: { ...tool, live_output: (tool.live_output || "") + delta },
+        };
+        updated = { ...updated, [taskId]: newMsgs };
+      }
+      return updated;
+    });
+  }, []);
+
   // 组件卸载时取消 pending 定时器
   useEffect(() => {
     return () => {
@@ -928,6 +989,10 @@ export function AgentView() {
       if (subagentThinkingRafRef.current !== null) {
         clearTimeout(subagentThinkingRafRef.current);
         subagentThinkingRafRef.current = null;
+      }
+      if (commandOutputRafRef.current !== null) {
+        clearTimeout(commandOutputRafRef.current);
+        commandOutputRafRef.current = null;
       }
     };
   }, []);
@@ -975,6 +1040,20 @@ export function AgentView() {
             // 调度定时器（150ms 间隔，累积更多文本 per update → 按段落显示而非逐字）
             if (thinkingRafRef.current === null) {
               thinkingRafRef.current = window.setTimeout(flushThinkingDeltas, 150);
+            }
+          }
+          return;
+        }
+
+        // 命令输出流式：run_command 执行期间输出逐段推送，实时追加到工具卡片
+        // （150ms 批量刷新，与思考链同样的节流策略）
+        if (event.event === "command_output") {
+          const delta = (event.delta as string) || "";
+          if (delta) {
+            const current = commandOutputBufferRef.current.get(taskId) || "";
+            commandOutputBufferRef.current.set(taskId, current + delta);
+            if (commandOutputRafRef.current === null) {
+              commandOutputRafRef.current = window.setTimeout(flushCommandOutputs, 150);
             }
           }
           return;
@@ -1304,7 +1383,7 @@ export function AgentView() {
         refreshTasks();
       }
     },
-    [refreshTaskDetail, refreshTasks, sendToRepeater, navigate, flushThinkingDeltas, flushSubagentThinking]
+    [refreshTaskDetail, refreshTasks, sendToRepeater, navigate, flushThinkingDeltas, flushSubagentThinking, flushCommandOutputs]
   );
 
   // WS (重)连成功后重同步：断开期间的事件丢失，刷新任务列表 + 当前任务详情兜底
@@ -2576,22 +2655,11 @@ interface ThinkingMessageProps {
 }
 
 const ThinkingMessage = memo(function ThinkingMessage({ content, streaming, id }: ThinkingMessageProps) {
-  // 流式时默认展开；流式结束后自动折叠
-  const [expanded, setExpanded] = useState(!!streaming);
-  const [userToggled, setUserToggled] = useState(false);
-
-  // streaming 状态变化时自动折叠（用户未手动操作过）
-  useEffect(() => {
-    if (!streaming && !userToggled) {
-      setExpanded(false);
-    }
-    if (streaming && !userToggled) {
-      setExpanded(true);
-    }
-  }, [streaming, userToggled]);
+  // 默认展开且不自动折叠（用户反馈：流式一结束就折叠，还没看完内容就没了）。
+  // 头部仍可点击手动收起；任务结束/刷新重建后也保持展开。
+  const [expanded, setExpanded] = useState(true);
 
   const handleToggle = () => {
-    setUserToggled(true);
     setExpanded((v) => !v);
   };
 
@@ -2673,7 +2741,10 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
         : JSON.stringify(tool.result, null, 2)
       : "";
 
-  const preview = isRunning ? "执行中…" : summarizeResult(tool.result);
+  const preview = isRunning
+    ? "执行中…"
+    : summarizeResult(tool.result) || summarizeArgs(tool.args);
+  const timeText = timestamp ? new Date(timestamp).toLocaleTimeString("zh-CN") : "";
 
   return (
     <div className="agent-chat-toolcard">
@@ -2690,6 +2761,7 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
             {preview}
           </span>
         )}
+        {timeText && <span className="agent-chat-toolcard-time-inline">{timeText}</span>}
         {expanded ? (
           <ChevronDown size={12} className="agent-chat-toolcard-chevron" />
         ) : (
@@ -2697,7 +2769,8 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
         )}
       </div>
 
-      {expanded && (
+      {/* 参数和结果都为空时不渲染 body——空壳卡片只剩一条分隔线，像奇怪的横线 */}
+      {expanded && (argsText || resultText) && (
         <div className="agent-chat-toolcard-body">
           {argsText && (
             <div className="agent-chat-toolcard-section">
@@ -2719,9 +2792,16 @@ const ToolCallCard = memo(function ToolCallCard({ tool, timestamp, onFlowClick }
         </div>
       )}
 
-      <div className="agent-chat-toolcard-time">
-        {timestamp ? new Date(timestamp).toLocaleTimeString("zh-CN") : ""}
-      </div>
+      {/* run_command 执行中实时输出：无需展开，始终滚动显示（对齐 Claude Code 终端体验）；
+          结果到达后本块消失，由上方「结果」区块接管 */}
+      {isRunning && tool.tool === "run_command" && tool.live_output && (
+        <div className="agent-chat-toolcard-body">
+          <div className="agent-chat-toolcard-section">
+            <div className="agent-chat-toolcard-label">实时输出</div>
+            <pre className="agent-chat-toolcard-pre">{tool.live_output.slice(-4000)}</pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 });
@@ -2742,7 +2822,9 @@ const SubagentToolRow = memo(function SubagentToolRow({ call }: SubagentToolRowP
         ? call.result
         : JSON.stringify(call.result, null, 2)
       : "";
-  const preview = isRunning ? "执行中…" : summarizeResult(call.result);
+  const preview = isRunning
+    ? "执行中…"
+    : summarizeResult(call.result) || summarizeArgs(call.args);
 
   return (
     <div className="agent-chat-subagent-tool">

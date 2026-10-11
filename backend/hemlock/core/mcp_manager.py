@@ -102,7 +102,7 @@ class McpConnection:
         try:
             import httpx
 
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
                 # 发送 initialize 请求
                 init_resp = await client.post(self.server.url, json={
                     "jsonrpc": "2.0",
@@ -162,7 +162,7 @@ class McpConnection:
                 resp = await self._send_request(req)
             else:
                 import httpx
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
                     resp = await client.post(self.server.url, json=req)
 
             if resp and "result" in resp:

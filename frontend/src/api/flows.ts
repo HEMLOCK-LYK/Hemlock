@@ -32,6 +32,35 @@ export async function replayFlow(flowId: string): Promise<ReplayResponse> {
   return data;
 }
 
+// ===== 登录态一键迁移（设计稿第一期，来源 B）=====
+
+export interface MigrateAuthResult {
+  migrated: boolean;
+  error?: string;
+  hint?: string;
+  session_id?: string;
+  flow_id?: string;
+  host?: string;
+  injected?: string[];
+  migrated_from?: string;
+  validation?: {
+    valid: boolean | null;
+    status: number;
+    reason: string;
+  };
+}
+
+/** 把流量请求头中的认证信息迁移到 AI 会话（task_id 缺省 = 项目最近任务） */
+export async function migrateFlowAuth(
+  flowId: string,
+  taskId?: string
+): Promise<MigrateAuthResult> {
+  const { data } = await client.post<MigrateAuthResult>(`/flows/${flowId}/migrate-auth`, {
+    task_id: taskId ?? null,
+  });
+  return data;
+}
+
 /** 清空指定项目的所有流量（不包括 intruder 源） */
 export async function clearFlows(projectId: string): Promise<{ deleted: number; project_id: string }> {
   const { data } = await client.delete<{ deleted: number; project_id: string }>("/flows", {

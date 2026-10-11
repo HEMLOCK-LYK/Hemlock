@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, Search, Inbox, Repeat, Swords, Bot, Power, Wifi, Filter, X, ShieldOff, BarChart3, Globe, Tag, Trash2, Settings2, ExternalLink, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
-import { listFlows, getFlow, getNoiseStats, listNoiseFlows, markFlowNoise, getNoiseAnalysis, clearFlows } from "../api/flows";
+import { RefreshCw, Search, Inbox, Repeat, Swords, Bot, Power, Wifi, Filter, X, ShieldOff, BarChart3, Globe, Tag, Trash2, Settings2, ExternalLink, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, KeyRound } from "lucide-react";
+import { listFlows, getFlow, getNoiseStats, listNoiseFlows, markFlowNoise, getNoiseAnalysis, clearFlows, migrateFlowAuth } from "../api/flows";
 import type { NoiseAnalysisItem } from "../api/flows";
 import { FLOWTAG_COLORS } from "../api/flowtag";
 import { FlowTagRules } from "./FlowTagRules";
@@ -527,6 +527,31 @@ export function FlowList() {
       fetchData();
     } catch {
       // 静默处理
+    }
+  };
+
+  // 登录态一键迁移：把该流量的认证头注入 AI 会话（凭据只进内存）
+  const handleMigrateAuth = async (flowId: string) => {
+    setContextMenu(null);
+    try {
+      const r = await migrateFlowAuth(flowId);
+      if (!r.migrated) {
+        alert(`迁移失败: ${r.error ?? "未知原因"}`);
+        return;
+      }
+      const v = r.validation;
+      const vText = v
+        ? v.valid === true
+          ? `\n\n登录态验证: 有效（${v.reason}）`
+          : v.valid === false
+            ? `\n\n登录态验证: 已失效（${v.reason}）\n请在浏览器重新登录后再迁移一次`
+            : `\n\n登录态验证: 未确定（${v.reason}）`
+        : "";
+      alert(
+        `已迁移到 AI 会话: ${r.injected?.join("、") ?? ""}${vText}`
+      );
+    } catch (e) {
+      alert(`迁移失败: ${e instanceof Error ? e.message : e}`);
     }
   };
 
@@ -1169,6 +1194,13 @@ export function FlowList() {
           >
             <Bot size={13} />
             发送到 AI 助手
+          </div>
+          <div
+            className="context-menu-item"
+            onClick={() => handleMigrateAuth(contextMenu.flowId)}
+          >
+            <KeyRound size={13} />
+            迁移认证头到 AI 会话
           </div>
           <div style={{ borderTop: "1px solid var(--border-default)", margin: "4px 0" }} />
           <div

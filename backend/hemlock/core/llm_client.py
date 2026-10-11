@@ -61,6 +61,48 @@ _token_usage: dict[str, int] = {
 _provider_clients: dict[str, OpenAI] = {}
 
 
+def _resolve_llm_proxy() -> str | None:
+    """LLM 出站代理：显式配置上游代理才走，否则直连。
+
+    不读环境代理（trust_env=False）：安全测试用户的机器常有 HTTP_PROXY/HTTPS_PROXY
+    指向 Burp/clash——Burp 的 TLS 中间人自签证书会让 LLM 请求证书校验失败，
+    Intercept 开启时请求被挂起，表现为"大模型 API 调用不通"。需要代理出站
+    （如直连不可达 Anthropic）的用户在设置页配置上游代理，与 Agent 请求、
+    子进程、浏览器同一条网络出口策略。
+    """
+    upstream = (getattr(settings, "upstream_proxy", "") or "").strip()
+    if not upstream:
+        return None
+    if not upstream.startswith(("http://", "https://", "socks5://", "socks4://")):
+        upstream = f"http://{upstream}"
+    return upstream
+
+
+# 共享 LLM 连接池：OpenAI 兼容协议与 Anthropic 原生协议共用（无认证头，
+# 鉴权按请求携带，避免 Provider 更新后连接池残留旧 key）。
+# upstream_proxy 变更时重建（模块级构造会固化代理，运行期改配置不生效）。
+_llm_http: httpx.Client | None = None
+_llm_http_proxy_sig: str | None = None
+
+
+def _get_llm_http() -> httpx.Client:
+    global _llm_http, _llm_http_proxy_sig
+    upstream = _resolve_llm_proxy()
+    if _llm_http is None or _llm_http_proxy_sig != upstream:
+        if _llm_http is not None:
+            try:
+                _llm_http.close()
+            except Exception:
+                pass
+            # 旧连接池已关闭，清掉持有它的 Provider 客户端缓存
+            _provider_clients.clear()
+        _llm_http = httpx.Client(
+            timeout=_REQUEST_TIMEOUT, trust_env=False, proxy=upstream
+        )
+        _llm_http_proxy_sig = upstream
+    return _llm_http
+
+
 def get_client() -> OpenAI:
     """获取 LLM 客户端。支持 OpenAI / DeepSeek / 任何 OpenAI 兼容接口。"""
     return OpenAI(
@@ -68,6 +110,7 @@ def get_client() -> OpenAI:
         base_url=settings.llm_base_url,
         timeout=_REQUEST_TIMEOUT,
         max_retries=0,  # 我们自己管理重试
+        http_client=_get_llm_http(),
     )
 
 
@@ -125,6 +168,7 @@ def _get_or_create_client(provider: "LLMProvider") -> OpenAI:
         base_url=provider.base_url,
         timeout=_REQUEST_TIMEOUT,
         max_retries=0,  # 我们自己管理重试
+        http_client=_get_llm_http(),
     )
     _provider_clients[provider.id] = client
     return client
@@ -228,8 +272,8 @@ def _apply_cache_control(messages: list[dict], model: str | None) -> list[dict]:
 _ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MAX_TOKENS = 8192  # Anthropic Messages API 必填的输出上限
 
-# 共享连接池（无认证头，鉴权按请求携带，避免 Provider 更新后连接池残留旧 key）
-_anthropic_http = httpx.Client(timeout=_REQUEST_TIMEOUT)
+# 共享连接池见 _get_llm_http()（与 OpenAI 兼容协议共用，无认证头，
+# 鉴权按请求携带，避免 Provider 更新后连接池残留旧 key）
 
 
 class _AnthropicError(Exception):
@@ -425,7 +469,7 @@ def _anthropic_request(config: dict[str, str], body: dict) -> dict:
         "content-type": "application/json",
     }
     try:
-        resp = _anthropic_http.post(url, json=body, headers=headers)
+        resp = _get_llm_http().post(url, json=body, headers=headers)
     except httpx.TimeoutException as e:
         raise APITimeoutError(e)  # 复用超时重试与错误信息
     except httpx.TransportError as e:
@@ -560,7 +604,7 @@ def _anthropic_stream(
         # 因此这里手动 enter 并检查状态码，让连接错误与 429/5xx 落在重试范围内
         if should_stop is not None and should_stop():
             raise _StopStream()
-        ctx = _anthropic_http.stream("POST", url, json=body, headers=headers)
+        ctx = _get_llm_http().stream("POST", url, json=body, headers=headers)
         try:
             resp = ctx.__enter__()
             if resp.status_code >= 400:

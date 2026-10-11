@@ -283,7 +283,7 @@ async def _search_fofa(query: str, size: int = 100) -> dict:
             "size": min(size, 100),
             "fields": "host,ip,port,title,server,protocol,domain,country,city",
         }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url, params=params)
         data = resp.json()
 
@@ -321,7 +321,7 @@ async def _search_quake(query: str, size: int = 100) -> dict:
         "start": 0,
         "include": ["ip", "port", "hostname", "service.name", "service.http.title", "location.country_cn", "location.city_cn"],
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.post(url, json=payload, headers=headers)
         data = resp.json()
 
@@ -358,7 +358,7 @@ async def _search_hunter(query: str, size: int = 100) -> dict:
         "page_size": min(size, 100),
         "is_web": 3,  # 搜索全部
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url, params=params)
         data = resp.json()
 
@@ -392,7 +392,7 @@ async def _search_zoomeye(query: str, size: int = 100) -> dict:
         "query": query,
         "page": 1,
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url, headers=headers, params=params)
         data = resp.json()
 
@@ -424,7 +424,7 @@ async def _search_alpha(query: str, size: int = 100) -> dict:
         "query": query,
         "size": min(size, 100),
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.post(url, json=payload, headers=headers)
         data = resp.json()
 
@@ -452,7 +452,7 @@ async def _search_chaos(query: str, size: int = 100) -> dict:
     # Chaos 只支持域名查询
     url = f"https://dns.projectdiscovery.io/dns/{query}/subdomains"
     headers = {"Authorization": key}
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url, headers=headers)
         data = resp.json()
 
@@ -467,7 +467,7 @@ async def _search_chaos(query: str, size: int = 100) -> dict:
 async def _search_crtsh(query: str, size: int = 100) -> dict:
     """crt.sh 证书透明度日志查询。"""
     url = f"https://crt.sh/?q={quote('%.' + query)}&output=json"
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url)
         if resp.status_code != 200:
             return {"error": f"crt.sh: HTTP {resp.status_code}"}
@@ -500,7 +500,7 @@ async def _search_hackertarget(query: str, size: int = 100) -> dict:
     url = f"https://api.hackertarget.com/hostsearch/?q={quote(query)}"
     if key:
         url += f"&api_key={key}"
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
         resp = await client.get(url)
         text = resp.text
 
@@ -537,7 +537,7 @@ async def _search_dns(query: str, size: int = 100) -> dict:
     # CNAME / MX / TXT / NS 通过 DNS over HTTPS (Google)
     doh_url = "https://dns.google/resolve"
     record_types = ["CNAME", "MX", "TXT", "NS"]
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
         for rtype in record_types:
             try:
                 resp = await client.get(doh_url, params={"name": query, "type": rtype})

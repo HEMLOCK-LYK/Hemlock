@@ -127,7 +127,11 @@ def test_build_chat_messages_uses_compaction_no_recompute(db):
 
 
 def test_build_chat_messages_without_compaction_keeps_original(db):
-    """无 compaction（首次累积期）时保留原文，压缩由兜底 assemble 处理。"""
+    """无 compaction（首次累积期）时原样展开，恢复阶段不做任何压缩重算。
+
+    旧版在这里按 4K 热窗口滑动蒸馏（每轮移动窗口边界改写历史前缀，
+    缓存命中归零）；现统一由运行循环的分界线检查负责压缩。
+    """
     steps = [
         _step("user_message", "问题1"),
         _step("assistant_message", "回复1"),

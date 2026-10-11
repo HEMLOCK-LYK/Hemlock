@@ -46,10 +46,12 @@ _DDG_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Hemlock
 def _make_client(use_proxy: bool = False) -> httpx.AsyncClient:
     """构建 HTTP 客户端。
 
-    默认直连（尊重系统环境代理 HTTP_PROXY/HTTPS_PROXY）；use_proxy=True 时
-    显式走工具里配置的上游代理（settings.upstream_proxy，用户在代理设置页配置）。
+    默认直连（不读环境代理：安全测试机常见 HTTP_PROXY 指向 Burp/clash，
+    Burp 的 TLS 中间人自签证书会截胡情报请求且不触发连接层兜底）；
+    use_proxy=True 或直连兜底时显式走工具里配置的上游代理
+    （settings.upstream_proxy，用户在代理设置页配置）。
     """
-    kwargs: dict[str, Any] = {"timeout": _REQUEST_TIMEOUT, "trust_env": True}
+    kwargs: dict[str, Any] = {"timeout": _REQUEST_TIMEOUT, "trust_env": False}
     if use_proxy:
         upstream = getattr(settings, "upstream_proxy", "") or ""
         if upstream:

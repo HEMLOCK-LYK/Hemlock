@@ -20,6 +20,7 @@ import {
   Users,
   Radar,
   CircleStop,
+  Workflow,
 } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
 import { Spinner } from "./Common";
@@ -54,6 +55,7 @@ const navSections = [
     title: "漏洞",
     items: [
       { to: "/findings", label: "漏洞管理", icon: Bug },
+      { to: "/attack-chain", label: "攻击链", icon: Workflow },
     ],
   },
   {
@@ -163,7 +165,7 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <Shield size={12} />
-          v0.6.0
+          v0.8.0
         </div>
       </div>
 

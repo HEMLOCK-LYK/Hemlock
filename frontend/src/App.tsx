@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -20,6 +20,11 @@ import { Settings } from "./views/Settings";
 import { MemoryManager } from "./views/MemoryManager";
 import { ProjectSelector } from "./views/ProjectSelector";
 import { useProject } from "./context/ProjectContext";
+
+/** 攻击链画布 lazy 分割：@xyflow/react 体积大，按需加载减主 bundle */
+const AttackChainView = lazy(() =>
+  import("./views/AttackChainView").then((m) => ({ default: m.AttackChainView }))
+);
 
 /** 隐藏并移除原生启动屏（加 fade-out 过渡动画） */
 function dismissSplash() {
@@ -93,6 +98,14 @@ export default function App() {
               <Route path="/llm-providers" element={<LLMProviders />} />
               <Route path="/memory" element={<MemoryManager />} />
               <Route path="/findings" element={<FindingsView />} />
+              <Route
+                path="/attack-chain"
+                element={
+                  <Suspense fallback={<div className="flex flex-col h-full" />}>
+                    <AttackChainView />
+                  </Suspense>
+                }
+              />
               <Route path="/flowtag" element={<FlowTagRules />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

@@ -25,7 +25,12 @@
 - list_reported_findings: 查看已报告漏洞列表（避免重复测试）
 - send_raw_request: 直接构造并发送原始 HTTP 请求包（类似 Repeater）
 - encode_decode: 编码/解码工具（URL/Base64/Hex/HTML/Unicode）
-- get_flow_detail: 查看指定流量的完整请求/响应详情
+- list_flows: 翻页浏览项目流量列表（表单级，时间倒序，支持 host/search/tag 过滤）
+- get_flow_detail: 查看指定流量的表单信息（元数据 + 字段预览）
+- read_flow_content: 按字段读取流量完整内容（默认一次读全）
+- view_attack_chain: 查看攻击链（自动从操作步骤构建，看清测试进度）
+- update_attack_chain: 补链节点/连边/确认（凭据依赖等语义衔接由 Agent 主动补）
+- export_attack_chain: 导出 Markdown 攻击路径（进漏洞报告/SRC 报告）
 - list_recon_reports: 列出所有已生成的侦察报告
 - get_recon_report: 读取指定侦察报告的完整内容
 - generate_pentest_report: 生成完整渗透测试报告（HTML/Markdown/JSON）
@@ -66,7 +71,6 @@ from hemlock.core.context_manager import (
     ContextAssembler,
     TokenEstimator,
     ToolOutputDistiller,
-    HOT_BUDGET_TOKENS,
 )
 from hemlock.services import ai_service, intruder_service, recon_service
 from hemlock.services.event_bus import event_bus
@@ -74,6 +78,7 @@ from hemlock.services.flowtag_engine import enrich_flow_fields
 from hemlock.services.session_service import (
     session_manager,
     send_request_with_session,
+    looks_like_login_page,
     authenticate as session_authenticate,
     set_session_header,
     set_session_variable,
@@ -85,6 +90,7 @@ from hemlock.models.finding import Finding, FINDING_STATUS_PENDING
 from hemlock.models.evidence import Evidence
 from hemlock.services.request_service import send_raw_request
 from hemlock.models.flow import Flow
+from hemlock.models.attack_chain import AttackChain, AttackNode
 from hemlock.core.agent_registry import AgentRole, get_role_by_name, get_all_roles, ensure_builtin_roles, build_roles_prompt
 from hemlock.models.llm_provider import LLMProvider
 
@@ -115,7 +121,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_session_request",
-            "description": "使用会话状态发送 HTTP 请求，自动携带 Cookie 和认证 Token。适用于需要登录态的测试（如越权测试、认证后功能测试）。默认直连目标；需要经上游代理访问目标时传 use_proxy=true。",
+            "description": "使用会话状态发送 HTTP 请求，自动携带 Cookie 和认证 Token。适用于需要登录态的测试（如越权测试、认证后功能测试）。默认直连目标；需要经上游代理访问目标时传 use_proxy=true。有已迁移登录态的会话优先用它（而不是盲发未认证请求）；返回 session_stale=true 表示登录态已失效，请提示用户重新迁移或改用 authenticate。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -538,8 +544,9 @@ AGENT_TOOLS = [
         "function": {
             "name": "get_flow_detail",
             "description": (
-                "查看指定流量的完整请求和响应详情。通过 flow_id 获取原始的请求头、请求体、"
-                "响应状态码、响应头和响应体。适用于回顾之前发送的请求结果、检查完整响应内容。"
+                "查看指定流量的表单信息：method/url/状态码/来源/各字段总长度 + 每字段开头预览。"
+                "用于回顾某条流量是什么、判断值不值得深入；需要某字段全文时配合 "
+                "read_flow_content(flow_id, field) 一次读全。"
                 "重要提示：如果用户直接粘贴了外部工具（如 Burp Suite）的原始数据包，"
                 "请先用 send_request 工具发送该请求生成平台流量，再用返回的 flow_id 调用本工具。"
                 "本工具只能查看平台已记录的流量，无法直接解析外部原始数据包。"
@@ -554,6 +561,232 @@ AGENT_TOOLS = [
                 },
                 "required": ["flow_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_flow_content",
+            "description": (
+                "读取指定流量某字段的完整内容（请求头/请求体/响应头/响应体）。"
+                "需要内容细节时直接调用，默认一次读全（上限 100K 字符，绝大多数字段一页读完）——"
+                "仅超大字段才需要用返回的 next_offset 续读。"
+                "send_request 返回 8KB 预览 + 本工具读全，构成完整内容链路。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "flow_id": {
+                        "type": "string",
+                        "description": "流量 ID（send_request/send_session_request/run_intruder 等工具返回的 flow_id）",
+                    },
+                    "field": {
+                        "type": "string",
+                        "enum": ["resp_body", "resp_headers", "req_body", "req_headers"],
+                        "description": "要读取的字段：resp_body=响应体（默认），resp_headers=响应头，req_body=请求体，req_headers=请求头",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始位置（字符数），默认 0；续读用上次返回的 next_offset",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "本次读取的字符数，默认 100000（一次读全），仅分段续读时才需要传",
+                    },
+                },
+                "required": ["flow_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tag_clues",
+            "description": (
+                "查看被动检测线索：FlowTag 检测规则命中流量的结构化视图"
+                "（含证据片段，按 high > medium > low 排序）。\n"
+                "适用于：接手项目时快速掌握可疑面（Shiro/JWT/Actuator/SQL 错误回显/"
+                "敏感信息泄漏等），针对性发起验证；长期抓包后审查积累的线索。\n"
+                "线索是提示不是结论：看到 high 线索应主动验证（verify_vulnerability / "
+                "send_request 构造 PoC），确认后再 report_finding。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_severity": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                        "description": "最低等级过滤（默认 low 全量；只要高危传 high）",
+                    },
+                    "host": {
+                        "type": "string",
+                        "description": "按 host 模糊过滤（多目标项目缩小范围）",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回条数上限，默认 50",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "migrate_flow_auth",
+            "description": (
+                "把一条流量的认证头迁移到你的会话（Authorization > Cookie > token 头），"
+                "迁移后立即探测登录态是否有效。之后用 send_session_request 即带该登录态。\n"
+                "适用：目标站登录有验证码/扫码，你无法自己登录——用户已在浏览器登录过，"
+                "抓包流量里就有现成凭据。候选流量定位：list_tag_clues 的「登录态」线索"
+                "（认证请求头/会话Cookie下发/密码表单提交），或 list_flows 按 host 找登录后"
+                "的请求——不要逐条翻流量。凭据只进内存不落盘，返回值不回显。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "flow_id": {
+                        "type": "string",
+                        "description": "要迁移的流量 ID（选登录成功之后的请求）",
+                    },
+                    "probe_url": {
+                        "type": "string",
+                        "description": "探测登录态的 URL（可选，默认用该流量的 URL）",
+                    },
+                },
+                "required": ["flow_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_flows",
+            "description": (
+                "翻页浏览项目的流量列表（等同人眼在抓包界面看到的 HTTP 历史表格，"
+                "时间倒序、一次一页）：每条包含 flow_id/method/url/状态码/响应长度/"
+                "标签/时间等表单信息，不含报文内容。默认过滤杂包（心跳/静态资源）。\n"
+                "适用：了解目标站点有哪些请求、按 host/URL 关键字/标签找流量、"
+                "接手已有抓包成果时先翻一遍列表。\n"
+                "看到感兴趣的条目后：单条表单详情用 get_flow_detail(flow_id)，"
+                "报文内容用 read_flow_content(flow_id, field) 读取。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "integer",
+                        "description": "页码，默认 1（时间倒序）；翻页用返回的 next_page",
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "description": "每页条数，默认 50，上限 100",
+                    },
+                    "host": {
+                        "type": "string",
+                        "description": "按 host 模糊过滤（多目标项目缩小范围）",
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "按 URL 关键字模糊过滤（如 'admin'、'.php'）",
+                    },
+                    "tag": {
+                        "type": "string",
+                        "description": "按标签名过滤（如 'ShiroRememberMe'，可用 list_tag_clues 先看有哪些线索）",
+                    },
+                    "include_noise": {
+                        "type": "boolean",
+                        "description": "是否包含杂包（心跳/静态资源），默认排除",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_attack_chain",
+            "description": (
+                "查看当前任务的攻击链。链 = 漏洞危害串联的故事线（如 SQL注入→写webshell→RCE、"
+                "XSS→CSRF→窃取敏感信息），漏洞报告/SRC 报告的攻击路径直接取自它。"
+                "recon/漏洞报告/认证/数据提取会自动入链；发现/验证漏洞后，"
+                "用 view 看链条现状、update_attack_chain 把危害推演的中间环节补进去。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_attack_chain",
+            "description": (
+                "编辑攻击链（危害串联故事线）。自动构建只做时间顺序主干，"
+                "危害升级的中间动作（写 webshell、提权、窃取数据这类不经过 report_finding 的环节）"
+                "和语义衔接靠你补：add_node 加节点（after_index 插到中间，如已验证 RCE 后补「写 webshell」"
+                "插到注入点和 RCE 之间）、add_edge 连语义边（label 写明因果：利用/升级/导致/窃取）、"
+                "remove_node/remove_edge 改错、confirm 确认为最终版（进报告）。"
+                "动作补录时机：验证完一个洞、推演出危害路径时立刻补，不要攒到任务结束。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add_node", "add_edge", "remove_node", "remove_edge", "confirm"],
+                        "description": "操作类型",
+                    },
+                    "node_type": {
+                        "type": "string",
+                        "enum": ["asset", "vuln", "credential", "action", "loot"],
+                        "description": "add_node：节点类型（中间动作环节用 action，拿到的东西用 loot）",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "add_node：节点标题（如 '写入 webshell 到 /upload/shell.jsp'）",
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": "add_node：结构化细节（自由文本；凭据会被自动脱敏为前4+****+后4）",
+                    },
+                    "flow_id": {
+                        "type": "string",
+                        "description": "add_node：关联证据流量（可选）",
+                    },
+                    "after_index": {
+                        "type": "integer",
+                        "description": "add_node：插到链上第 N 个节点之后（不填则追加链尾）",
+                    },
+                    "node_index": {
+                        "type": "integer",
+                        "description": "remove_node：要删除的节点序号",
+                    },
+                    "from_index": {
+                        "type": "integer",
+                        "description": "add_edge/remove_edge：起点节点序号（view_attack_chain 输出中的编号，从 1 开始）",
+                    },
+                    "to_index": {
+                        "type": "integer",
+                        "description": "add_edge/remove_edge：终点节点序号",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "add_edge：边的语义标签（如 '利用'、'升级为RCE'、'窃取'）",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_attack_chain",
+            "description": (
+                "导出攻击链的 Markdown 攻击路径描述（含每步依据与证据流量 ID），"
+                "可直接粘进 report_finding 的报告正文或给用户写 SRC 报告用；"
+                "同时落盘到工作区 attack_chain.md。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -598,6 +831,16 @@ AGENT_TOOLS = [
                         "default": "any",
                     },
                     "sensitive": {"type": "boolean", "description": "是否大小写敏感", "default": True},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low", "info"],
+                        "description": "检测等级：命中后进入 list_tag_clues 线索视图（info=仅标注不出线索，默认 info）",
+                        "default": "info",
+                    },
+                    "clue_type": {
+                        "type": "string",
+                        "description": "线索分类（如 '疑似漏洞'/'敏感信息泄漏'/'组件攻击面'），默认 'flowtag'",
+                    },
                 },
                 "required": ["name", "f_regex"],
             },
@@ -704,7 +947,7 @@ AGENT_TOOLS = [
                 "工作目录持久化：cwd 参数生效后，后续调用默认沿用同一目录（初始为工作区）；"
                 "返回值中的 cwd 即当前目录，写入文件前先确认它在哪。\n"
                 "长任务（全端口扫描、大字典爆破、慢速爬虫）传 run_in_background=true 立即返回，"
-                "用 check_background 轮询状态与输出，不要让对话干等。\n"
+                "命令结束后自动通知你结果（无需轮询）；期间可用 check_background 查询进度或终止。\n"
                 "注意：运行环境是 Windows(cmd)，无 grep/head/sed/awk/tail 等 Unix 命令（会报'不是内部或外部命令'）；"
                 "文本处理用 Python(run_script) 或 node 替代，如 run_script 执行 'import re;print(...)'。\n"
                 "此为敏感操作，需用户确认后执行。危险命令（rm -rf、format、shutdown 等）会被拦截。"
@@ -726,7 +969,7 @@ AGENT_TOOLS = [
                     },
                     "run_in_background": {
                         "type": "boolean",
-                        "description": "true 时转入后台执行，立即返回 background_id 与日志路径（配合 check_background 使用）",
+                        "description": "true 时转入后台执行，立即返回 background_id 与日志路径；命令结束后自动通知结果（check_background 可主动查询/终止）",
                     },
                 },
                 "required": ["command"],
@@ -854,7 +1097,8 @@ AGENT_TOOLS = [
             "name": "check_background",
             "description": (
                 "查询或终止 run_command 的后台任务（run_in_background=true 启动时返回 background_id）。\n"
-                "action=status（默认）返回运行状态、输出尾部 output_tail；action=kill 强制终止进程。\n"
+                "后台命令完成后会自动通知你结果，通常无需主动轮询；此工具用于中途查看进度（action=status，"
+                "返回运行状态与输出尾部 output_tail）或强制终止（action=kill）。\n"
                 "任务结束后后台句柄不再保留，但日志文件仍在磁盘，可按 log_path 用 read_file 读取。"
             ),
             "parameters": {
@@ -1382,6 +1626,7 @@ COORDINATOR_READONLY_TOOLS = frozenset({
     "get_test_coverage",
     "list_reported_findings",
     "get_flow_detail",
+    "list_flows",
     "get_strategy",
     "get_payload_list",
     "llm_analyze_evidence",
@@ -1389,6 +1634,9 @@ COORDINATOR_READONLY_TOOLS = frozenset({
     "list_recon_reports",
     "get_recon_report",
     "list_flowtag_rules",
+    "list_tag_clues",
+    "view_attack_chain",
+    "export_attack_chain",
 })
 
 # load_tools 工具：始终注入，Agent 需要时加载工具组
@@ -1714,6 +1962,96 @@ COORDINATOR_PROMPT = """你是 Hemlock 多 Agent 协作的 **指挥官（Coordin
 """
 
 
+class _StreamCollector:
+    """子进程输出流收集器（对齐 Claude Code Bash 输出策略）。
+
+    - 逐 chunk 读取直到 EOF，支持流式回调（on_chunk 实时推送前端）
+    - 内存上限滑动窗口：超 cap 后保留头尾各半、累计丢弃量，防大输出撑爆内存
+    - wait(timeout) 超时强制取消读取，partial() 仍可取已收集数据
+      （超时 kill 场景下"部分输出不丢"的关键：先 kill 进程再收割读取任务）
+    """
+
+    def __init__(self, stream, cap: int = 2_000_000, on_chunk: Callable[[bytes], None] | None = None):
+        self._stream = stream
+        self._cap = cap
+        self._on_chunk = on_chunk
+        self._buf = bytearray()
+        self._dropped = 0
+        self._task = asyncio.create_task(self._run()) if stream is not None else None
+
+    async def _run(self) -> None:
+        half = self._cap // 2
+        try:
+            while True:
+                chunk = await self._stream.read(65536)
+                if not chunk:
+                    break
+                if self._on_chunk:
+                    try:
+                        self._on_chunk(chunk)
+                    except Exception:
+                        pass
+                self._buf.extend(chunk)
+                if len(self._buf) > self._cap:
+                    # 滑动窗口：保留头尾各半，中间丢弃并累计
+                    self._dropped += len(self._buf) - self._cap
+                    self._buf = self._buf[:half] + self._buf[len(self._buf) - half:]
+        except Exception:
+            pass  # 流异常按 EOF 处理（进程被 kill 时管道可能异常关闭）
+
+    def partial(self) -> bytes:
+        """已收集的数据（任务被取消后仍可调用）。"""
+        return bytes(self._buf)
+
+    @property
+    def dropped(self) -> int:
+        return self._dropped
+
+    async def wait(self, timeout: float | None = None) -> None:
+        """等待读取结束。timeout 后取消读取（partial() 保留已收集数据）。
+
+        timeout 用于兜底"孙进程继承管道导致 EOF 永不到来"的极端场景：
+        进程本身已退出，不再等管道耗尽。
+        """
+        if self._task is None:
+            return
+        try:
+            if timeout is None:
+                await self._task
+            else:
+                await asyncio.wait_for(self._task, timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if not self._task.done():
+                self._task.cancel()
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+
+def _truncate_output(text: str, max_chars: int = 30000, tail_chars: int = 12000) -> str:
+    """head+tail 截断（对齐 Claude Code Bash 输出截断）。
+
+    中间省略：头部保留命令起始信息，尾部保留结果汇总（执行结果通常在尾部）。
+    完整输出由调用方落盘并通过 full_output_file 提示 read_file 分页读取。
+
+    ⚠️ 缓存安全约束（用户强调，2026-10-09）：截断只发生在工具返回值进入
+    历史的「插入时」，tool_result 固化进 steps/messages 后字节不再变化；
+    恢复重建走确定性序列化，与插入时逐字节一致。绝不允许改成
+    「每轮发送时动态重算截断」——那会让同一轮历史在不同请求间字节不同，
+    前缀缓存全炸。
+    """
+    if len(text) <= max_chars:
+        return text
+    head = max(max_chars - tail_chars, 0)
+    omitted = len(text) - head - tail_chars
+    return (
+        text[:head]
+        + f"\n... [中间省略 {omitted} 字符，完整输出已落盘，可用 read_file 分页读取] ...\n"
+        + text[-tail_chars:]
+    )
+
+
 class AgentOrchestrator:
     """AI Agent 编排器：管理任务生命周期，驱动 AI 逐步执行。"""
 
@@ -1721,6 +2059,11 @@ class AgentOrchestrator:
     SENSITIVE_TOOLS = {"run_intruder", "run_command", "run_script"}
     # 敏感操作确认超时（秒），超时自动拒绝
     CONFIRM_TIMEOUT = 300
+    # 命令/脚本输出展示上限（字符）：超出走 head+tail 截断 + 完整落盘。
+    # 对齐 Claude Code 的 30000：阈值过低会让 Agent 反复 read_file 读回中间内容，
+    # 同一份数据多次进上下文 → 更快触发分界线推进（每次推进=一次缓存重置）。
+    # 截断本身发生在插入历史时、一次性固化（恢复重建字节一致），不影响前缀缓存。
+    _OUTPUT_MAX = 30000
 
     def __init__(self, db: Session, task: Task, provider_id: str | None = None):
         self.db = db
@@ -1761,8 +2104,11 @@ class AgentOrchestrator:
         if self._confirm_event:
             self._confirm_event.set()
         # 终止本任务启动的后台命令（run_command run_in_background），
-        # 避免"用户已停止测试但扫描进程还在跑"
+        # 避免"用户已停止测试但扫描进程还在跑"；完成监视任务一并取消
         for entry in list(self._bg_procs.values()):
+            watcher = entry.get("watcher")
+            if watcher and not watcher.done():
+                watcher.cancel()
             try:
                 proc = entry.get("proc")
                 if proc and proc.returncode is None:
@@ -1869,6 +2215,18 @@ class AgentOrchestrator:
                 return TASK_STATUS_PAUSED
 
             try:
+                # 中途消息注入（inbox 与 chat 模式共用）：后台命令完成通知、
+                # 用户插话等，下一循环边界即时识别（对齐 Claude Code 通知机制）
+                for injected in self.drain_inbox():
+                    messages.append({"role": "user", "content": injected})
+                    self._add_step("user_message", injected)
+                    self._emit("agent", {
+                        "event": "chat_message",
+                        "task_id": self.task.id,
+                        "role": "user",
+                        "content": injected,
+                    })
+
                 if not _has_llm(self.db):
                     self._add_step("error", "未配置 LLM API Key，Agent 无法运行")
                     self._update_task(TASK_STATUS_FAILED, "No LLM configured")
@@ -1892,9 +2250,12 @@ class AgentOrchestrator:
                         "content": f"[系统提示] 以下是当前测试进度，请参考决定下一步操作：{context_prompt}{strategy_hint}",
                     })
 
-                    # ===== 分界线机制：追加区超预算才推进压缩分界线 =====
-                    # 每 5 步（注入上下文时）检查；有 compaction 时历史固化，
-                    # messages 总 token ≈ 追加区 token，超窗口 50% 才推进。
+                # ===== 分界线机制：追加区超预算才推进压缩分界线 =====
+                # 第一步（step_num=0）就检查：遗留超长对话恢复后立即推进压缩，
+                # 不依赖上下文注入节点（self.context 可能为 None）；之后每 interval 步
+                # 检查一次。有 compaction 时历史固化，messages 总 token ≈ 追加区 token，
+                # 超窗口 50% 才推进。
+                if step_num % self._context_inject_interval == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
                     threshold = int(_get_context_window(self.db, self.provider_id) * 0.5)
                     if current_tokens > threshold:
@@ -1962,6 +2323,8 @@ class AgentOrchestrator:
 
                 if content and "TASK_COMPLETE" in content:
                     self._add_step("complete", content)
+                    # 任务结束：从全部步骤自动构建攻击链（设计稿定稿的构建时机之一）
+                    self._build_attack_chain()
                     self._update_task(TASK_STATUS_DONE, content)
                     self._emit("agent", {"event": "task_complete", "task_id": self.task.id, "summary": content})
                     return TASK_STATUS_DONE
@@ -2044,6 +2407,7 @@ class AgentOrchestrator:
                 self._emit("agent", {"event": "step_error", "task_id": self.task.id, "step": step_num + 1, "error": error_msg})
 
                 if consecutive_errors >= max_consecutive_errors:
+                    self._build_attack_chain()
                     self._update_task(TASK_STATUS_FAILED, f"连续 {max_consecutive_errors} 次错误: {e}")
                     return TASK_STATUS_FAILED
 
@@ -2056,6 +2420,7 @@ class AgentOrchestrator:
         # 达到最大步数
         msg = f"达到最大步数限制 ({self.max_steps})"
         self._add_step("limit", msg)
+        self._build_attack_chain()
         self._update_task(TASK_STATUS_DONE, msg)
 
         # 输出 Token 用量统计
@@ -2134,6 +2499,20 @@ class AgentOrchestrator:
             return self._tool_encode_decode(args)
         elif name == "get_flow_detail":
             return self._tool_get_flow_detail(args)
+        elif name == "read_flow_content":
+            return self._tool_read_flow_content(args)
+        elif name == "list_flows":
+            return self._tool_list_flows(args)
+        elif name == "view_attack_chain":
+            return self._tool_view_attack_chain(args)
+        elif name == "update_attack_chain":
+            return self._tool_update_attack_chain(args)
+        elif name == "export_attack_chain":
+            return self._tool_export_attack_chain(args)
+        elif name == "list_tag_clues":
+            return self._tool_list_tag_clues(args)
+        elif name == "migrate_flow_auth":
+            return await self._tool_migrate_flow_auth(args)
         elif name == "list_flowtag_rules":
             return self._tool_list_flowtag_rules(args)
         elif name == "add_flowtag_rule":
@@ -2319,6 +2698,76 @@ class AgentOrchestrator:
 
     # ===== 工具实现 =====
 
+    # HTTP 响应预览上限（字符）：headers 1000 / body 8000。
+    # body 取 8000 而非更小（用户强调，2026-10-09）：预览过小会逼 Agent 用
+    # get_flow_detail / read_flow_content 把同一份响应二次读回上下文——
+    # 同一数据注入两次，token 浪费 + 加速分界线推进（每次推进 = 一次缓存重置）。
+    # 8000 字符序列化后 ~9KB，低于微压缩阈值（_MICRO_COMPACT_THRESHOLD=10000），
+    # 绝大多数响应一次请求即可完整透传；更大的响应才需要分页读取。
+    _FLOW_HEADERS_PREVIEW = 1000
+    _FLOW_BODY_PREVIEW = 8000
+
+    # read_flow_content 单次读取上限（字符，默认值 = 上限）：
+    # 用户定调（2026-10-09）：Agent 大部分情况不需要读 flow 内容（列表/表单够用），
+    # 需要读的时候就是有必要的读全部——默认一次读全（100K，对齐 read_file 的 100KB），
+    # 传了 offset/limit 才分段。绝大多数字段一页读完，不再有 50K 上限逼出的翻页。
+    _FLOW_READ_CHUNK = 100000
+
+    def _persist_flow_and_result(
+        self,
+        resp: dict,
+        *,
+        method: str,
+        url: str,
+        req_headers: str,
+        req_body: str,
+        source: str,
+    ) -> dict:
+        """流量落库（Flow 表存全量）+ 构建截断后的工具返回结果。
+
+        send_request / send_session_request / send_raw_request 三处原本各有一份
+        完全相同的落库 + 截断代码，收拢到这里统一维护。预览上限：headers 1000 /
+        body 8000 字符（见 _FLOW_BODY_PREVIEW 的注释）；完整内容用
+        read_flow_content（按字段一次读全）取回，单条表单用 get_flow_detail。
+        """
+        _rh = resp.get("headers", "")
+        _rb = resp.get("body", "")
+        _rqh = resp.get("req_headers", req_headers)
+        flow = Flow(
+            project_id=self.task.project_id,
+            method=method.upper(),
+            url=url,
+            req_headers=_rqh,
+            req_body=req_body,
+            resp_status=resp.get("status"),
+            resp_headers=_rh,
+            resp_body=_rb,
+            source=source,
+            duration_ms=resp.get("duration_ms"),
+            **enrich_flow_fields(url, _rqh, req_body, _rh, _rb, resp.get("status")),
+        )
+        self.db.add(flow)
+        self.db.commit()
+        self.db.refresh(flow)
+
+        event_bus.publish("flow", {"event": "new_flow", "flow_id": flow.id, "url": url, "source": source})
+
+        return {
+            "flow_id": flow.id,
+            "status": resp.get("status"),
+            "headers": (_rh or "")[: self._FLOW_HEADERS_PREVIEW],
+            "body": (_rb or "")[: self._FLOW_BODY_PREVIEW],
+            "duration_ms": resp.get("duration_ms"),
+            "resp_length": len(_rb or ""),
+            "flow_id_for_detail": flow.id,
+            "truncated": len(_rb or "") > self._FLOW_BODY_PREVIEW or len(_rh or "") > self._FLOW_HEADERS_PREVIEW,
+            "hint": (
+                "响应已截断（仅预览）。需要完整响应体时用 read_flow_content(flow_id, "
+                "field=\"resp_body\") 一次读全；需要单条表单用 get_flow_detail(flow_id)；"
+                "浏览全部流量用 list_flows"
+            ),
+        }
+
     async def _tool_send_request(self, args: dict) -> dict:
         """发送无状态 HTTP 请求。"""
         method = args.get("method", "GET")
@@ -2334,38 +2783,10 @@ class AgentOrchestrator:
             use_proxy=bool(args.get("use_proxy")),
         )
 
-        _rh = resp.get("headers", "")
-        _rb = resp.get("body", "")
-        _rqh = resp.get("req_headers", headers)
-        flow = Flow(
-            project_id=self.task.project_id,
-            method=method.upper(),
-            url=url,
-            req_headers=_rqh,
-            req_body=body,
-            resp_status=resp.get("status"),
-            resp_headers=_rh,
-            resp_body=_rb,
-            source="agent",
-            duration_ms=resp.get("duration_ms"),
-            **enrich_flow_fields(url, _rqh, body, _rh, _rb, resp.get("status")),
+        return self._persist_flow_and_result(
+            resp, method=method, url=url,
+            req_headers=headers, req_body=body, source="agent",
         )
-        self.db.add(flow)
-        self.db.commit()
-        self.db.refresh(flow)
-
-        event_bus.publish("flow", {"event": "new_flow", "flow_id": flow.id, "url": url, "source": "agent"})
-
-        return {
-            "flow_id": flow.id,
-            "status": resp.get("status"),
-            "headers": (resp.get("headers", "") or "")[:1000],
-            "body": (resp.get("body", "") or "")[:3000],
-            "duration_ms": resp.get("duration_ms"),
-            "flow_id_for_detail": flow.id,
-            "truncated": len(resp.get("body", "") or "") > 3000 or len(resp.get("headers", "") or "") > 1000,
-            "hint": "响应已截断以节省 Token。如需查看完整请求/响应详情，使用 get_flow_detail 工具并传入 flow_id",
-        }
 
     async def _tool_send_session_request(self, args: dict) -> dict:
         """使用会话状态发送 HTTP 请求。"""
@@ -2383,38 +2804,36 @@ class AgentOrchestrator:
             use_proxy=bool(args.get("use_proxy")),
         )
 
-        _rh = resp.get("headers", "")
-        _rb = resp.get("body", "")
-        _rqh = resp.get("req_headers", headers)
-        flow = Flow(
-            project_id=self.task.project_id,
-            method=method.upper(),
-            url=url,
-            req_headers=_rqh,
-            req_body=body,
-            resp_status=resp.get("status"),
-            resp_headers=_rh,
-            resp_body=_rb,
-            source="agent_session",
-            duration_ms=resp.get("duration_ms"),
-            **enrich_flow_fields(url, _rqh, body, _rh, _rb, resp.get("status")),
+        # 被动 stale 检测（设计稿 §5）：响应像被踢回登录页时标记会话并告知 Agent，
+        # 让它换思路（重新请求迁移 / 报告用户），而不是对着登录页测半天
+        try:
+            _location = ""
+            for _line in (resp.get("headers") or "").splitlines():
+                if _line.lower().startswith("location:"):
+                    _location = _line.split(":", 1)[1].strip()
+                    break
+            if looks_like_login_page(resp.get("status", 0) or 0, _location, (resp.get("body") or "")[:3000]):
+                _state = session_manager.get_session(self.session_id)
+                if _state:
+                    _state.stale = True
+        except Exception:
+            pass
+
+        result = self._persist_flow_and_result(
+            resp, method=method, url=url,
+            req_headers=headers, req_body=body, source="agent_session",
         )
-        self.db.add(flow)
-        self.db.commit()
-        self.db.refresh(flow)
 
-        event_bus.publish("flow", {"event": "new_flow", "flow_id": flow.id, "url": url, "source": "agent_session"})
-
-        return {
-            "flow_id": flow.id,
-            "status": resp.get("status"),
-            "headers": (resp.get("headers", "") or "")[:1000],
-            "body": (resp.get("body", "") or "")[:3000],
-            "duration_ms": resp.get("duration_ms"),
-            "flow_id_for_detail": flow.id,
-            "truncated": len(resp.get("body", "") or "") > 3000 or len(resp.get("headers", "") or "") > 1000,
-            "hint": "响应已截断以节省 Token。如需查看完整请求/响应详情，使用 get_flow_detail 工具并传入 flow_id",
-        }
+        # Agent 感知：结果里带 session_stale 标记（设计稿 §5）
+        _state = session_manager.get_session(self.session_id)
+        if _state is not None and getattr(_state, "stale", False):
+            result["session_stale"] = True
+            result["stale_hint"] = (
+                "会话登录态疑似已失效（401/30x 跳登录/登录页特征）。请停止未认证状态的猜测性测试："
+                "提示用户重新在浏览器登录后迁移（流量右键「迁移认证头到 AI 会话」），或改用 "
+                "authenticate 重新登录。"
+            )
+        return result
 
     async def _tool_authenticate(self, args: dict) -> dict:
         """执行认证流程。"""
@@ -3012,6 +3431,325 @@ class AgentOrchestrator:
 
         return self.context.recommend_strategy()
 
+    def _tool_list_tag_clues(self, args: dict) -> dict:
+        """查看被动检测线索（FlowTag 检测规则命中的结构化视图）。"""
+        from hemlock.services.flowtag_engine import collect_tag_clues
+
+        project_id = getattr(self.task, "project_id", None)
+        if not project_id:
+            return {"error": "当前任务未关联项目，无法查询线索"}
+
+        clues = collect_tag_clues(
+            self.db,
+            project_id,
+            min_severity=(args.get("min_severity") or "low"),
+            host=(args.get("host") or "").strip() or None,
+            limit=min(int(args.get("limit", 50) or 50), 200),
+        )
+
+        # 按等级汇总，方便 Agent 快速判断量级
+        summary: dict[str, int] = {"high": 0, "medium": 0, "low": 0}
+        for c in clues:
+            summary[c["severity"]] = summary.get(c["severity"], 0) + 1
+
+        return {
+            "total": len(clues),
+            "summary": summary,
+            "clues": clues,
+            "hint": (
+                "线索是提示不是结论。high/medium 线索建议逐条验证：用 send_request 构造 "
+                "PoC 或调 verify_vulnerability，确认后 report_finding；误报可忽略。"
+            ),
+        }
+
+    async def _tool_migrate_flow_auth(self, args: dict) -> dict:
+        """把流量认证头迁移到当前会话（拿现成登录态办事），迁移后立即探测有效性。
+
+        来源 B 的 Agent 侧入口（用户右键走 POST /flows/{id}/migrate-auth，同一实现）。
+        凭据只进 session_manager 内存、返回值不回显完整凭据（session_service 保证）。
+        """
+        from hemlock.services.session_service import (
+            migrate_flow_auth_to_session,
+            validate_migrated_session,
+        )
+
+        flow = self.db.query(Flow).filter(Flow.id == args.get("flow_id", "")).first()
+        if flow is None:
+            return {"error": "flow not found"}
+
+        result = migrate_flow_auth_to_session(flow, self.session_id)
+        if not result.get("migrated"):
+            return result  # 未发现认证头：error + hint 原样给 Agent
+
+        probe_url = (args.get("probe_url") or flow.url or "").strip()
+        if probe_url:
+            probe = await validate_migrated_session(self.session_id, probe_url)
+            result["probe"] = probe
+            if probe.get("valid") is False:
+                result["session_stale"] = True
+        result["hint"] = "后续请求用 send_session_request 即带此登录态；凭据只进内存不落盘。"
+        return result
+
+    def _tool_list_flows(self, args: dict) -> dict:
+        """翻页浏览项目流量列表（人眼视角的 HTTP 历史表格）。
+
+        表单级信息（不含报文内容）：Flow 列上已有 resp_length/host/tags 等
+        拆分字段，列表查询不加载 body，几百页流量也零开销。
+        内容按需走 get_flow_detail（单条表单）→ read_flow_content（字段全文）。
+        """
+        try:
+            page = max(int(args.get("page", 1) or 1), 1)
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = int(args.get("page_size", 50) or 50)
+        except (TypeError, ValueError):
+            page_size = 50
+        page_size = max(1, min(page_size, 100))
+
+        q = self.db.query(Flow).filter(Flow.project_id == self.task.project_id)
+        host = (args.get("host") or "").strip()
+        if host:
+            q = q.filter(Flow.host.like(f"%{host}%"))
+        search = (args.get("search") or "").strip()
+        if search:
+            q = q.filter(Flow.url.like(f"%{search}%"))
+        tag = (args.get("tag") or "").strip()
+        if tag:
+            q = q.filter(Flow.tags.like(f"%{tag}%"))
+        if not args.get("include_noise"):
+            q = q.filter(Flow.is_noise == False)  # noqa: E712 —— 默认过滤心跳/静态资源，对齐人眼视图
+
+        total = q.count()
+        total_pages = (total + page_size - 1) // page_size
+        flows = (
+            q.order_by(Flow.timestamp.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+
+        items = [
+            {
+                "flow_id": f.id,
+                "method": f.method,
+                "url": (f.url or "")[:200],
+                "host": f.host or "",
+                "resp_status": f.resp_status,
+                "resp_length": f.resp_length,
+                "mime_type": f.mime_type or "",
+                "tags": f.tags or "",
+                "source": f.source or "",
+                "time": str(f.timestamp or "")[:19],
+            }
+            for f in flows
+        ]
+        result = {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "flows": items,
+        }
+        if page < total_pages:
+            result["next_page"] = page + 1
+            result["hint"] = f"第 {page}/{total_pages} 页。翻页用 page={page + 1}；读某条内容用 read_flow_content(flow_id, field)"
+        elif total == 0:
+            result["hint"] = "无匹配流量。放宽 host/search/tag 过滤或检查项目是否已抓包"
+        elif page > total_pages:
+            result["hint"] = f"超出页码范围（共 {total_pages} 页）"
+        return result
+
+    # ===== 攻击链三工具（设计稿 docs/attack-chain-design.md 第一期）=====
+
+    def _build_attack_chain(self) -> None:
+        """从任务步骤自动构建攻击链（任务结束/分界线推进前调用）。
+
+        构建失败不影响主流程（设计稿：链是沉淀，不能拖垮任务）。
+        """
+        try:
+            from hemlock.services.attack_chain_builder import build_from_steps
+            chain = build_from_steps(self.db, self.task)
+            if chain is not None:
+                event_bus.publish("chain", {
+                    "event": "chain_updated",
+                    "task_id": self.task.id,
+                    "chain_id": chain.id,
+                    "status": chain.status,
+                })
+        except Exception as e:
+            logger.warning(f"攻击链自动构建失败（非致命）: {e}")
+
+    def _tool_view_attack_chain(self, args: dict) -> dict:
+        """查看当前任务攻击链（查看时增量构建一次——幂等、只补新步骤）。"""
+        from hemlock.services.attack_chain_builder import build_from_steps, render_chain_text
+
+        chain = build_from_steps(self.db, self.task)
+        if chain is None:
+            return {
+                "total_nodes": 0,
+                "text": "（尚无攻击链：还没有可入链的操作。recon/漏洞报告/认证/数据提取等动作会自动入链）",
+                "hint": "链随任务推进自动生长；发现关键语义衔接（如凭据依赖）时用 update_attack_chain 补。",
+            }
+        node_count = self.db.query(AttackNode).filter(AttackNode.chain_id == chain.id).count()
+        return {
+            "chain_id": chain.id,
+            "name": chain.name,
+            "status": chain.status,
+            "total_nodes": node_count,
+            "text": render_chain_text(self.db, chain),
+        }
+
+    def _tool_update_attack_chain(self, args: dict) -> dict:
+        """补充/更新攻击链：add_node / add_edge / confirm。返回更新后的文本视图。"""
+        from hemlock.services.attack_chain_builder import (
+            build_from_steps,
+            ensure_chain,
+            mask_credential_text,
+            render_chain_text,
+        )
+
+        action = args.get("action", "")
+        # 确保链存在（自动构建无产出时手工建空链）
+        chain = build_from_steps(self.db, self.task) or ensure_chain(
+            self.db, getattr(self.task, "project_id", None), self.task.id
+        )
+
+        if action == "add_node":
+            node_type = args.get("node_type", "")
+            title = (args.get("title") or "").strip()
+            if node_type not in ("asset", "vuln", "credential", "action", "loot"):
+                return {"error": "node_type 必须是 asset/vuln/credential/action/loot"}
+            if not title:
+                return {"error": "title 不能为空"}
+            # credential 节点的 detail 必经脱敏（设计稿硬要求：入库一律只存掩码）
+            detail_text = args.get("detail", "") or ""
+            if node_type == "credential":
+                detail_text = mask_credential_text(detail_text)
+            detail_payload: dict = {"_manual": True}
+            if detail_text:
+                detail_payload["description"] = detail_text
+            node = AttackNode(
+                chain_id=chain.id,
+                node_type=node_type,
+                title=title[:300],
+                detail=json.dumps(detail_payload, ensure_ascii=False),
+                flow_id=args.get("flow_id") or None,
+            )
+            # after_index：插到链上第 N 个节点之后（危害升级链的中间环节补录——
+            # 如「SQL注入 → [补]写webshell → RCE」）。实现：借用宿主节点的 source_step，
+            # created_at 更晚自然排在其后；不填则追加链尾。
+            after_index = args.get("after_index")
+            if isinstance(after_index, int) and after_index >= 1:
+                from hemlock.services.attack_chain_builder import _ordered_nodes
+                nodes = _ordered_nodes(self.db, chain.id)
+                if 1 <= after_index <= len(nodes):
+                    node.source_step = nodes[after_index - 1].source_step
+            self.db.add(node)
+            self.db.flush()  # 拿到 node.id 供连线
+            from hemlock.services.attack_chain_builder import _rebuild_edges
+            _rebuild_edges(self.db, chain)
+            self.db.commit()
+
+        elif action == "remove_node":
+            from hemlock.services.attack_chain_builder import _ordered_nodes
+            nodes = _ordered_nodes(self.db, chain.id)
+            idx = args.get("node_index")
+            if not isinstance(idx, int) or not (1 <= idx <= len(nodes)):
+                return {"error": f"node_index 必须是 1~{max(len(nodes), 1)} 之间的整数（见 view_attack_chain 输出的编号）"}
+            node = nodes[idx - 1]
+            # 级联清边：删掉所有引用该节点的边
+            try:
+                edges = json.loads(chain.edges or "[]")
+            except (json.JSONDecodeError, ValueError):
+                edges = []
+            edges = [
+                e for e in edges
+                if isinstance(e, dict) and e.get("from") != node.id and e.get("to") != node.id
+            ]
+            chain.edges = json.dumps(edges, ensure_ascii=False)
+            self.db.delete(node)
+            self.db.commit()
+            # 剩余节点按时间序重连主干（手工边照常保留）
+            from hemlock.services.attack_chain_builder import _rebuild_edges
+            _rebuild_edges(self.db, chain)
+            self.db.commit()
+
+        elif action == "remove_edge":
+            from hemlock.services.attack_chain_builder import _ordered_nodes
+            nodes = _ordered_nodes(self.db, chain.id)
+            fi, ti = args.get("from_index"), args.get("to_index")
+            if not isinstance(fi, int) or not isinstance(ti, int) or not (1 <= fi <= len(nodes)) or not (1 <= ti <= len(nodes)):
+                return {"error": f"from_index/to_index 必须是 1~{max(len(nodes), 1)} 之间的整数"}
+            a, b = nodes[fi - 1].id, nodes[ti - 1].id
+            try:
+                edges = json.loads(chain.edges or "[]")
+            except (json.JSONDecodeError, ValueError):
+                edges = []
+            kept = [e for e in edges if not (isinstance(e, dict) and e.get("from") == a and e.get("to") == b)]
+            if len(kept) == len(edges):
+                return {"error": "该方向上没有边可删"}
+            chain.edges = json.dumps(kept, ensure_ascii=False)
+            self.db.commit()
+            # 主干边由自动构建维护：删掉的主干边会在下次增量构建时恢复，返回里说明白
+            trunk = {(x.id, y.id) for x, y in zip(nodes, nodes[1:])}
+            if (a, b) in trunk:
+                return {"ok": True, "note": "删除的是时间序主干边，下次链自动生长时会重建；手工补的边不会被恢复"}
+
+        elif action == "add_edge":
+            from hemlock.services.attack_chain_builder import _ordered_nodes
+            nodes = _ordered_nodes(self.db, chain.id)
+            fi, ti = args.get("from_index"), args.get("to_index")
+            if not isinstance(fi, int) or not isinstance(ti, int) or not (1 <= fi <= len(nodes)) or not (1 <= ti <= len(nodes)):
+                return {"error": f"from_index/to_index 必须是 1~{max(len(nodes), 1)} 之间的整数（见 view_attack_chain 输出的编号）"}
+            if fi == ti:
+                return {"error": "不能连到自身"}
+            try:
+                edges = json.loads(chain.edges or "[]")
+            except (json.JSONDecodeError, ValueError):
+                edges = []
+            edges.append({
+                "from": nodes[fi - 1].id,
+                "to": nodes[ti - 1].id,
+                "label": (args.get("label") or "").strip(),
+            })
+            chain.edges = json.dumps(edges, ensure_ascii=False)
+            self.db.commit()
+
+        elif action == "confirm":
+            node_count = self.db.query(AttackNode).filter(AttackNode.chain_id == chain.id).count()
+            if node_count == 0:
+                return {"error": "链上没有节点，无法确认"}
+            chain.status = "confirmed"
+            self.db.commit()
+
+        else:
+            return {"error": "action 必须是 add_node / add_edge / remove_node / remove_edge / confirm"}
+
+        return {"ok": True, "chain_id": chain.id, "status": chain.status, "text": render_chain_text(self.db, chain)}
+
+    def _tool_export_attack_chain(self, args: dict) -> dict:
+        """导出攻击链 Markdown（直接进漏洞报告），同时落盘工作区 attack_chain.md。"""
+        from hemlock.services.attack_chain_builder import build_from_steps, export_chain_markdown
+
+        chain = build_from_steps(self.db, self.task)
+        if chain is None:
+            return {"error": "尚无攻击链可导出（链上没有任何节点）"}
+        md = export_chain_markdown(self.db, chain)
+        saved_to = ""
+        try:
+            path = self._get_workspace() / "attack_chain.md"
+            path.write_text(md, encoding="utf-8")
+            saved_to = str(path)
+        except Exception as e:
+            logger.debug(f"攻击链落盘失败（非致命）: {e}")
+        return {
+            "chain_id": chain.id,
+            "markdown": md,
+            "saved_to": saved_to,
+            "hint": "markdown 可直接粘进 report_finding 的 detail 或用于 SRC 报告正文。",
+        }
+
     def _tool_list_flowtag_rules(self, args: dict) -> dict:
         """列出所有 FlowTag 规则。"""
         from hemlock.services.flowtag_engine import flowtag_engine
@@ -3042,6 +3780,8 @@ class AgentOrchestrator:
             "scope": args.get("scope", "any"),
             "enabled": True,
             "sensitive": args.get("sensitive", True),
+            "severity": args.get("severity", "info"),
+            "clue_type": args.get("clue_type", ""),
         }
         rules.append(new_rule)
         flowtag_engine.save_rules(rules)
@@ -3334,7 +4074,22 @@ class AgentOrchestrator:
             "title": finding.title,
         })
 
-        return {"finding_id": finding.id, "status": "reported"}
+        # 攻击链联动：本步骤会被自动抽成 vuln 节点（幂等构建在此刻只含之前的步骤）。
+        # 提示一行，引导 Agent 把危害串联路径写进报告——不自动改报告正文，Agent 可控。
+        chain_hint = ""
+        try:
+            from hemlock.services.attack_chain_builder import build_from_steps
+            chain = build_from_steps(self.db, self.task)
+            if chain is not None:
+                node_count = self.db.query(AttackNode).filter(AttackNode.chain_id == chain.id).count()
+                chain_hint = (
+                    f"漏洞已自动入攻击链（当前链 {node_count} 节点）。"
+                    "写报告需要完整攻击路径时，先 export_attack_chain 取 Markdown 粘入正文。"
+                )
+        except Exception as e:
+            logger.debug(f"report_finding 攻击链提示构建失败（非致命）: {e}")
+
+        return {"finding_id": finding.id, "status": "reported", "chain_hint": chain_hint}
 
     async def _tool_run_request_chain(self, args: dict) -> dict:
         """执行多步请求链：按顺序发送请求，每步可提取数据注入下一步。
@@ -3616,7 +4371,10 @@ class AgentOrchestrator:
 
         对齐 Claude Code 体验：
         - cwd 持久化（self._cwd），跨调用沿用；返回值始终带当前 cwd 与 workspace 绝对路径
-        - run_in_background=true 转后台，立即返回 background_id + 日志路径，check_background 轮询
+        - run_in_background=true 转后台，立即返回 background_id + 日志路径；完成后自动通知
+        - 输出流式推送前端（event=command_output），工具卡片实时滚动
+        - 超时终止时保留已产出的部分输出（不再丢弃）
+        - 超长输出 head+tail 截断展示，完整输出落盘 full_output_file（read_file 可读回）
         - 超时上限 300s -> 600s（长扫描/爆破场景）
         """
         command = args.get("command", "").strip()
@@ -3659,46 +4417,130 @@ class AgentOrchestrator:
                 env=proxy_env,
             )
 
+            # 流式收集：on_chunk 逐段推送前端；超时 kill 后已产出输出通过 partial() 收割
+            out_col = _StreamCollector(proc.stdout, on_chunk=self._make_command_output_emitter(command))
+            err_col = _StreamCollector(proc.stderr)
+            timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                timed_out = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
                 await proc.wait()
-                return {
-                    "error": f"命令执行超时（{timeout}s）",
-                    "command": command,
-                    "cwd": workdir,
-                    "workspace": str(self._get_workspace()),
-                    "partial_output": "进程已被终止；长任务建议 run_in_background=true",
-                }
+            # 进程已退出，管道兜底 15s（孙进程继承管道导致 EOF 不来的极端场景不再死等）
+            await out_col.wait(timeout=15)
+            await err_col.wait(timeout=15)
 
-            stdout_text = stdout.decode("utf-8", errors="replace")
-            stderr_text = stderr.decode("utf-8", errors="replace")
+            stdout_full = out_col.partial().decode("utf-8", errors="replace")
+            stderr_full = err_col.partial().decode("utf-8", errors="replace")
 
-            # 截断输出
-            max_output = 10000
-            if len(stdout_text) > max_output:
-                stdout_text = stdout_text[:max_output] + f"\n... [输出已截断，共 {len(stdout_text)} 字符]"
-            if len(stderr_text) > max_output:
-                stderr_text = stderr_text[:max_output] + f"\n... [错误输出已截断，共 {len(stderr_text)} 字符]"
+            # 超长输出落盘完整版，展示层 head+tail 截断
+            needs_full = (
+                len(stdout_full) + len(stderr_full) > self._OUTPUT_MAX
+                or out_col.dropped + err_col.dropped > 0
+            )
+            full_file = self._save_full_output(stdout_full, stderr_full) if needs_full else None
 
             result = {
                 "command": command,
                 "exit_code": proc.returncode,
-                "stdout": stdout_text,
-                "stderr": stderr_text,
+                "stdout": _truncate_output(stdout_full),
+                "stderr": _truncate_output(stderr_full),
                 "cwd": workdir,
                 "workspace": str(self._get_workspace()),
-                "success": proc.returncode == 0,
+                "success": proc.returncode == 0 and not timed_out,
             }
+            if timed_out:
+                result["error"] = (
+                    f"命令执行超时（{timeout}s），进程已终止；以上为超时前已产出的部分输出"
+                )
+                result["hint"] = (
+                    "长任务建议 run_in_background=true 转后台（完成后自动通知），或调大 timeout"
+                )
+            if full_file:
+                result["full_output_file"] = full_file
             if proxy_env:
                 result["proxy"] = "命令网络流量已默认走上游代理（localhost 除外）"
             return result
 
         except Exception as e:
             return {"error": f"命令执行失败: {type(e).__name__}: {e}", "command": command}
+
+    def _make_command_output_emitter(self, command: str) -> Callable[[bytes], None]:
+        """构建命令输出流式回调：逐 chunk 经 event_bus 推前端（event=command_output）。
+
+        前端把 delta 追加到当前执行中的 run_command 工具卡片（对齐 Claude Code
+        终端实时输出）。推送失败静默，不影响命令执行本身。
+        """
+        task_id = self.task.id
+
+        def _on_chunk(chunk: bytes) -> None:
+            try:
+                event_bus.publish("agent", {
+                    "event": "command_output",
+                    "task_id": task_id,
+                    "tool": "run_command",
+                    "command": command,
+                    "delta": chunk.decode("utf-8", errors="replace"),
+                })
+            except Exception:
+                pass
+
+        return _on_chunk
+
+    def _save_full_output(self, stdout_text: str, stderr_text: str) -> str | None:
+        """完整命令输出落盘到工作区 .agent_out/，返回路径（失败返回 None）。
+
+        展示层 head+tail 截断后，Agent 仍可用 read_file 分页读回全文
+        （对齐 Claude Code：截断的 Bash 输出可读文件取回）。
+        """
+        try:
+            import hashlib
+            out_dir = self._get_workspace() / ".agent_out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.md5(
+                (stdout_text + stderr_text).encode("utf-8", errors="replace")
+            ).hexdigest()[:8]
+            path = out_dir / f"{int(datetime.now().timestamp())}_{digest}.log"
+            content = stdout_text
+            if stderr_text.strip():
+                content += "\n--- stderr ---\n" + stderr_text
+            path.write_text(content, encoding="utf-8")
+            return str(path)
+        except Exception:
+            return None
+
+    async def _watch_background_proc(self, bg_id: str) -> None:
+        """后台命令完成监视：进程退出后自动把结果注入 inbox。
+
+        对齐 Claude Code 后台任务：完成后 Agent 在下一循环边界自动收到
+        退出码与输出尾部，无需轮询 check_background。任务已取消则不注入
+        （停止就是停止）；check_background kill 掉的命令同样会触发通知
+        （退出码非 0，属真实结果）。
+        """
+        entry = self._bg_procs.get(bg_id)
+        if not entry:
+            return
+        proc: asyncio.subprocess.Process = entry["proc"]
+        try:
+            exit_code = await proc.wait()
+        except Exception:
+            return
+        entry["exit_code"] = exit_code
+        if self._cancelled:
+            return
+        tail = self._tail_file(entry["log_path"], 2000)
+        self.enqueue_user_message(
+            f"[后台命令完成] background_id={bg_id}\n"
+            f"命令: {entry['command']}\n"
+            f"退出码: {exit_code}\n"
+            f"输出尾部:\n{tail if tail.strip() else '（无输出）'}\n"
+            f"完整日志: {entry['log_path']}（可用 read_file 读取）\n"
+            f"请根据结果决定下一步。"
+        )
 
     async def _run_command_background(
         self, command: str, workdir: str, creationflags: int
@@ -3729,6 +4571,10 @@ class AgentOrchestrator:
             "log_path": log_path,
             "command": command,
         }
+        # 完成监视：进程退出后自动注入结果到 inbox（Agent 下一循环边界感知）
+        self._bg_procs[bg_id]["watcher"] = asyncio.create_task(
+            self._watch_background_proc(bg_id)
+        )
         return {
             "background_id": bg_id,
             "command": command,
@@ -3736,7 +4582,8 @@ class AgentOrchestrator:
             "workspace": str(self._get_workspace()),
             "log_path": str(log_path),
             "message": (
-                "命令已转入后台执行。用 check_background(background_id) 查询状态与输出；"
+                "命令已转入后台执行。完成后会自动通知你结果（无需轮询）；"
+                "期间可用 check_background(background_id) 主动查询进度或终止，"
                 "日志文件也可直接 read_file 读取。"
             ),
         }
@@ -3943,32 +4790,41 @@ class AgentOrchestrator:
                 env=self._subprocess_proxy_env(),
             )
 
+            # 流式收集：超时 kill 后已产出输出通过 partial() 收割（不再丢弃）
+            out_col = _StreamCollector(proc.stdout)
+            err_col = _StreamCollector(proc.stderr)
+            timed_out = False
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                timed_out = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
                 await proc.wait()
+            await out_col.wait(timeout=10)
+            await err_col.wait(timeout=10)
+
+            stdout_full = out_col.partial().decode("utf-8", errors="replace")
+            stderr_full = err_col.partial().decode("utf-8", errors="replace")
+
+            if timed_out:
                 return {
-                    "error": f"脚本执行超时（{timeout}s）",
-                    "partial_output": "进程已被终止",
+                    "error": (
+                        f"脚本执行超时（{timeout}s），进程已终止；"
+                        "stdout/stderr 为超时前已产出的部分输出"
+                    ),
+                    "exit_code": proc.returncode,
+                    "stdout": _truncate_output(stdout_full),
+                    "stderr": _truncate_output(stderr_full),
+                    "success": False,
                 }
-
-            stdout_text = stdout.decode("utf-8", errors="replace")
-            stderr_text = stderr.decode("utf-8", errors="replace")
-
-            # 截断输出
-            max_output = 10000
-            if len(stdout_text) > max_output:
-                stdout_text = stdout_text[:max_output] + f"\n... [输出已截断]"
-            if len(stderr_text) > max_output:
-                stderr_text = stderr_text[:max_output] + f"\n... [错误输出已截断]"
 
             return {
                 "exit_code": proc.returncode,
-                "stdout": stdout_text,
-                "stderr": stderr_text,
+                "stdout": _truncate_output(stdout_full),
+                "stderr": _truncate_output(stderr_full),
                 "success": proc.returncode == 0,
             }
 
@@ -4756,34 +5612,10 @@ class AgentOrchestrator:
             )
             source = "agent_raw"
 
-        _rh = resp.get("headers", "")
-        _rb = resp.get("body", "")
-        _rqh = resp.get("req_headers", headers)
-        flow = Flow(
-            project_id=self.task.project_id,
-            method=method.upper(),
-            url=url,
-            req_headers=_rqh,
-            req_body=body,
-            resp_status=resp.get("status"),
-            resp_headers=_rh,
-            resp_body=_rb,
-            source=source,
-            duration_ms=resp.get("duration_ms"),
-            **enrich_flow_fields(url, _rqh, body, _rh, _rb, resp.get("status")),
+        return self._persist_flow_and_result(
+            resp, method=method, url=url,
+            req_headers=headers, req_body=body, source=source,
         )
-        self.db.add(flow)
-        self.db.commit()
-        self.db.refresh(flow)
-
-        event_bus.publish("flow", {"event": "new_flow", "flow_id": flow.id, "url": url, "source": source})
-
-        return {
-            "flow_id": flow.id,
-            "status": resp.get("status"),
-            "headers": resp.get("headers", "")[:500],
-            "body": resp.get("body", "")[:2000],
-        }
 
     def _tool_encode_decode(self, args: dict) -> dict:
         """编码/解码工具，支持 URL / Base64 / Hex / HTML / Unicode。"""
@@ -4834,14 +5666,8 @@ class AgentOrchestrator:
         except Exception as e:
             return {"error": f"编码/解码失败: {type(e).__name__}: {e}"}
 
-    def _tool_get_flow_detail(self, args: dict) -> dict:
-        """查看指定流量的完整请求和响应详情。"""
-        flow_id = args.get("flow_id")
-        if flow_id is None:
-            return {"error": "flow_id 不能为空。请使用 send_request 等工具返回的 flow_id（如 'flw_xxx' 格式）。"}
-
-        # 兼容整数和字符串类型的 flow_id
-        # 如果传入的是纯数字，也尝试作为整数查询
+    def _find_flow_by_id(self, flow_id) -> Flow | None:
+        """按 ID 查找流量，兼容整数/字符串/纯数字截断等多种传入形态。"""
         flow = self.db.query(Flow).filter(Flow.id == str(flow_id)).first()
         if not flow and isinstance(flow_id, (int, float)):
             flow = self.db.query(Flow).filter(Flow.id == str(int(flow_id))).first()
@@ -4850,6 +5676,22 @@ class AgentOrchestrator:
             flow_id_str = str(flow_id).strip()
             if flow_id_str.isdigit():
                 flow = self.db.query(Flow).filter(Flow.id.like(f"%{flow_id_str}")).first()
+        return flow
+
+    def _tool_get_flow_detail(self, args: dict) -> dict:
+        """查看指定流量的表单信息（元数据 + 字段短预览 + 总长度）。
+
+        定位（用户定调，2026-10-09）：大部分情况 Agent 只需要 flow 的「表单」——
+        method/url/状态码/字段长度/开头一段预览足够判断这是什么流量；
+        真需要内容细节时是有必要的读全部，用 read_flow_content(field) 一次读全。
+        本工具不做 10K 级的中间态截断——那种「不够全又太大」的尴尬中间层
+        正是逼 Agent 反复补读的浪费来源。
+        """
+        flow_id = args.get("flow_id")
+        if flow_id is None:
+            return {"error": "flow_id 不能为空。请使用 send_request 等工具返回的 flow_id（如 'flw_xxx' 格式）。"}
+
+        flow = self._find_flow_by_id(flow_id)
         if not flow:
             return {
                 "error": f"流量 ID '{flow_id}' 不存在。",
@@ -4857,31 +5699,80 @@ class AgentOrchestrator:
                         "如果用户粘贴了外部数据包，请先用 send_request 发送请求生成平台流量。",
             }
 
-        # 大内容截断以节省 Token（完整数据仍在数据库中，可按需分片读取）
-        _CAP = 10000
-        req_headers = (flow.req_headers or "")[:_CAP]
-        req_body = (flow.req_body or "")[:_CAP]
-        resp_headers = (flow.resp_headers or "")[:_CAP]
-        resp_body = (flow.resp_body or "")[:_CAP]
-        truncated = any(
-            len(x) > _CAP
-            for x in (flow.req_headers or "", flow.req_body or "", flow.resp_headers or "", flow.resp_body or "")
-        )
+        # 表单预览：每字段开头 800 字符（足够识别内容类型），总长度单列
+        _PREVIEW = 800
+        fields = {
+            "req_headers": flow.req_headers or "",
+            "req_body": flow.req_body or "",
+            "resp_headers": flow.resp_headers or "",
+            "resp_body": flow.resp_body or "",
+        }
 
         return {
             "flow_id": flow.id,
             "method": flow.method,
             "url": flow.url,
-            "req_headers": req_headers,
-            "req_body": req_body,
             "resp_status": flow.resp_status,
-            "resp_headers": resp_headers,
-            "resp_body": resp_body,
             "source": flow.source or "",
             "created_at": flow.timestamp.isoformat() if flow.timestamp else "",
-            "truncated": truncated,
-            "note": "内容已截断至 10000 字符以节省 Token，完整数据保留在数据库中",
+            "field_lengths": {k: len(v) for k, v in fields.items()},
+            **{k: v[:_PREVIEW] for k, v in fields.items()},
+            "note": "以上为表单信息（各字段仅预览开头 800 字符，完整长度见 field_lengths）。"
+                    "需要某字段全文时用 read_flow_content(flow_id, field) 一次读全，无需分段。",
         }
+
+    def _tool_read_flow_content(self, args: dict) -> dict:
+        """按字段读取流量的完整内容——需要细节时一次读全。
+
+        用户定调（2026-10-09）：需要读的时候就是有必要的读全部。默认不传
+        offset/limit 即读全（上限 _FLOW_READ_CHUNK=100K 字符，对齐 read_file）；
+        仅超大的字段才用 next_offset 续读。send_request 返回的 8KB 预览 +
+        本工具读全，构成完整的内容获取链路，无中间态截断。
+        """
+        flow_id = args.get("flow_id")
+        if flow_id is None:
+            return {"error": "flow_id 不能为空。请使用 send_request 等工具返回的 flow_id。"}
+
+        field = args.get("field", "resp_body")
+        if field not in ("req_headers", "req_body", "resp_headers", "resp_body"):
+            return {"error": f"field 仅支持 req_headers / req_body / resp_headers / resp_body，收到: {field}"}
+
+        flow = self._find_flow_by_id(flow_id)
+        if not flow:
+            return {
+                "error": f"流量 ID '{flow_id}' 不存在。",
+                "hint": "请确认使用的是 send_request/run_intruder 等工具返回的 flow_id。",
+            }
+
+        try:
+            offset = max(int(args.get("offset", 0) or 0), 0)
+            limit = int(args.get("limit", self._FLOW_READ_CHUNK) or self._FLOW_READ_CHUNK)
+        except (TypeError, ValueError):
+            return {"error": "offset/limit 必须是整数"}
+        limit = max(1, min(limit, self._FLOW_READ_CHUNK))
+
+        content = getattr(flow, field) or ""
+        total = len(content)
+        chunk = content[offset:offset + limit]
+        has_more = offset + limit < total
+
+        result = {
+            "flow_id": flow.id,
+            "field": field,
+            "offset": offset,
+            "limit": limit,
+            "total_length": total,
+            "content": chunk,
+            "has_more": has_more,
+        }
+        if has_more:
+            result["next_offset"] = offset + limit
+            result["hint"] = "未读完。继续读取用 read_flow_content(flow_id, field, offset=next_offset)"
+        elif total == 0:
+            result["hint"] = "该字段为空"
+        elif offset > 0:
+            result["hint"] = "已读到末尾"
+        return result
 
     # ===== 辅助方法 =====
 
@@ -4919,9 +5810,16 @@ class AgentOrchestrator:
 
 
 # 微压缩阈值（字符）：工具结果超过此值才在插入消息时蒸馏。
-# 工具级截断已把 send_request 等结果限制在 ~5KB 内，直接透传保留
-# flow_id/关键信息给 LLM；仅真正超大的输出（如 call_api 大响应）在此蒸馏。
-_MICRO_COMPACT_THRESHOLD = 6000
+# 取 10000 与 send_request 的 body 预览（_FLOW_BODY_PREVIEW=8000）联动：
+# 预览 + flow_id 等字段 JSON 序列化后 ~9KB，低于阈值直接透传——Agent 一次请求
+# 就能看到完整预览，不必二次读取（用户强调：截断太小 → Agent 补读 → 同一数据
+# 二次注入上下文，反而浪费）。仅真正超大的输出（如 call_api 大响应）在此蒸馏。
+# ⚠️ 缓存安全约束（用户强调，2026-10-09）：蒸馏只发生在工具结果进入历史的
+# 「插入时」，固化进 steps/messages 后字节不再变化；恢复重建走同一个确定性函数
+# _tool_result_to_llm_content，与插入时逐字节一致（test_cache_byte_consistency.py
+# 钉死此性质）。绝不允许改成「每轮发送时动态重算蒸馏」——那会让同一轮历史在
+# 不同请求间字节不同，前缀缓存全炸。
+_MICRO_COMPACT_THRESHOLD = 10000
 
 
 def _tool_result_to_llm_content(tool_name: str, tool_args: dict, tool_result: Any) -> str:
@@ -4929,7 +5827,7 @@ def _tool_result_to_llm_content(tool_name: str, tool_args: dict, tool_result: An
 
     对齐 Claude Code 的 Microcompact：超大工具输出在插入消息时即蒸馏，
     避免原始大输出堆积在上下文里（也避免等到超预算才批量压缩）。
-    阈值取 _MICRO_COMPACT_THRESHOLD（6000 字符），低于阈值原样透传，
+    阈值取 _MICRO_COMPACT_THRESHOLD（10000 字符），低于阈值原样透传，
     保留 flow_id 等关键引用，供 Agent 调 get_flow_detail / report_finding。
     完整结果仍保存在 task.steps 与数据库中，前端展示与数据复用不受影响。
     """
@@ -5023,12 +5921,24 @@ def _messages_to_compact_text(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# 战术要点信号词：assistant 消息中出现这些词时，该行大概率包含压缩后
+# 不应丢失的关键结论（WAF 特性、绕过手法、失败教训、凭据线索等）。
+_TACTICAL_SIGNAL_WORDS = (
+    "发现", "确认", "存在", "绕过", "bypass", "Bypass", "失败", "拦截",
+    "过滤", "WAF", "waf", "注意", "凭证", "口令", "密码", "token", "Token",
+    "JWT", "jwt", "反射", "可控", "利用", "漏洞", "注入",
+)
+
+
 def _build_session_memory(pentest_context: Any, old_text: str = "") -> str:
     """构建 Session Memory（免费压缩层，对齐 Claude Code sessionMemory.ts）。
 
     PentestContext 已被 _auto_track_context 持续更新（端点/参数/漏洞/技术栈/进度），
     WarmMemoryBuilder 可零成本生成结构化进展摘要，无需再调 LLM。
     附加上近期用户指令，保证用户意图不丢。
+    再附加上近期战术要点：Agent 自己的关键结论（WAF 特性、绕过经验、失败尝试）
+    不在 PentestContext 结构化数据里，只在对话文本中——不提取的话压缩后即丢，
+    长期挖洞时这些恰恰是最值钱的上下文。
     """
     from hemlock.core.context_manager import WarmMemoryBuilder
 
@@ -5043,6 +5953,19 @@ def _build_session_memory(pentest_context: Any, old_text: str = "") -> str:
         user_lines = [l for l in old_text.split("\n") if l.startswith("[user] ")]
         if user_lines:
             parts.append("### 近期用户指令\n" + "\n".join(l.replace("[user] ", "- ") for l in user_lines[-3:]))
+
+        # 战术要点：提取 assistant 消息（含工具调用伴随的分析）中带信号词的行，
+        # 确定性提取、不调 LLM；每行截 200 字符，最多取最近 10 条
+        tactical = []
+        for l in old_text.split("\n"):
+            if not (l.startswith("[assistant] ") or l.startswith("[助手分析] ")):
+                continue
+            if any(w in l for w in _TACTICAL_SIGNAL_WORDS):
+                body = l.replace("[assistant] ", "").replace("[助手分析] ", "").strip()
+                if body:
+                    tactical.append(f"- {body[:200]}")
+        if tactical:
+            parts.append("### 近期战术要点\n" + "\n".join(tactical[-10:]))
     return "\n\n".join(parts)
 
 
@@ -5081,7 +6004,7 @@ async def _auto_compact_messages(
             "role": "user",
             "content": (
                 "[上下文压缩] 早期对话已压缩为以下测试进展，请基于它继续决策。"
-                "需要细节时用 get_flow_detail / list_reported_findings / get_memory 等工具查完整数据。\n"
+                "需要细节时用 list_flows（翻页浏览流量）/ get_flow_detail（单条表单）/ list_reported_findings / get_memory 等工具查完整数据。\n"
                 "=== 进展摘要 ===\n"
                 f"{session_memory}\n"
                 "=== 摘要结束 ==="
@@ -5122,7 +6045,7 @@ async def _auto_compact_messages(
             "role": "user",
             "content": (
                 "[上下文压缩] 早期对话已被 LLM 压缩为进展摘要，请基于摘要继续决策。"
-                "需要细节时用 get_flow_detail / list_reported_findings / get_memory 等工具查完整数据。\n"
+                "需要细节时用 list_flows（翻页浏览流量）/ get_flow_detail（单条表单）/ list_reported_findings / get_memory 等工具查完整数据。\n"
                 "=== 进展摘要 ===\n"
                 f"{summary}\n"
                 "=== 摘要结束 ==="
@@ -5162,6 +6085,14 @@ async def _advance_compaction_boundary(
     Returns:
         (新消息列表, 压缩方式)：'session_memory' / 'llm' / 'deterministic' / 'none'
     """
+    # 分界线推进前：把存量步骤抽进攻击链（原始步骤即将被压缩覆盖，先抢救依据）
+    if db is not None:
+        try:
+            from hemlock.services.attack_chain_builder import build_from_steps
+            build_from_steps(db, task)
+        except Exception:
+            logger.debug("推进前攻击链构建失败（非致命）", exc_info=True)
+
     # 追加区 = 最后一个 compaction 之后的全部步骤
     last_comp = -1
     for _i, _st in enumerate(steps):
@@ -5178,13 +6109,17 @@ async def _advance_compaction_boundary(
     if len(_messages_to_compact_text(append_msgs)) < 800:
         return messages, "none"
 
-    # AutoCompact 压缩追加区（keep_recent=0：整段进 boundary，固化映射简单）
+    # AutoCompact 压缩追加区。keep_recent=10：最近 10 条原文留在压缩结果里
+    # 不进摘要——刚拿到的工具输出/证据下一轮还要用，压掉会迫使 Agent 重新
+    # get_flow_detail 白花 token（对齐 Claude Code compact 保留近期消息的行为）。
+    # 固化映射仍然简单：compaction.messages = [boundary] + recent，
+    # 展开后逐字节稳定，前缀缓存持续命中。
     comp_msgs, ctype = await _auto_compact_messages(
         append_msgs,
         db=db,
         provider_id=provider_id,
         key=f"boundary_{task.id}",
-        keep_recent=0,
+        keep_recent=10,
         pentest_context=pentest_context,
     )
     if ctype == "none" or not comp_msgs:
@@ -5783,7 +6718,7 @@ def _inject_memory_snapshot(messages: list[dict], db: Session | None, task: Task
 
 
 def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = None, system_prompt_override: str | None = None, pentest_context: PentestContext | None = None) -> list[dict]:
-    """从 task.steps 恢复 LLM 对话历史（messages 格式），并执行上下文压缩。
+    """从 task.steps 恢复 LLM 对话历史（messages 格式）。
 
     映射规则：
     - user_message      -> role:user
@@ -5864,30 +6799,11 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
 
     # ===== 分界线机制：线性展开（历史 compaction 固化，不重算）=====
     # 遇到 compaction 步骤直接展开其压缩结果，历史段逐字节稳定 → 前缀缓存命中。
+    # 无 compaction 时（首次累积期）原样展开、不做任何压缩重算——
+    # 旧版在这里按 4K 热窗口滑动蒸馏，每轮移动窗口边界都会改写历史前缀
+    # （缓存命中率归零 + 过早丢失工具输出原文）。膨胀兜底统一由运行循环的
+    # 分界线检查负责：恢复后第一步就检查 token 量，超窗口 50% 才推进一次压缩。
     messages.extend(_linear_restore_steps(steps))
-
-    # 上下文压缩兜底：仅当 steps 中没有 compaction（首次累积期 / 旧对话）时，
-    # 用 ContextAssembler 全量重算防膨胀；已有 compaction 时历史已固化，
-    # 追加区超预算由 _advance_compaction_boundary 推进分界线，这里不再重算。
-    has_compaction = any(step.get("type") == "compaction" for step in steps)
-    if not has_compaction:
-        if pentest_context is None:
-            pentest_context = get_context(task.id)
-        conv_msg_count = sum(1 for m in messages if m.get("role") != "system")
-        if conv_msg_count > 6:
-            assembler = ContextAssembler()
-            original_tokens = TokenEstimator.estimate_messages(messages)
-            messages = assembler.assemble(
-                system_prompt=messages[0].get("content", "") if messages else "",
-                messages=messages,
-                pentest_context=pentest_context,
-            )
-            compressed_tokens = TokenEstimator.estimate_messages(messages)
-            if original_tokens > compressed_tokens:
-                logger.info(
-                    f"上下文压缩: {original_tokens} → {compressed_tokens} tokens "
-                    f"(节省 {original_tokens - compressed_tokens}, {conv_msg_count} 条对话消息)"
-                )
 
     return messages
 
@@ -6195,6 +7111,15 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
             logger.info("对话模式注入记忆快照")
     except Exception as e:
         logger.debug(f"注入记忆快照失败（非致命）: {e}")
+
+    # 1.6 分界线兜底：恢复后先检查一次（遗留超长对话在第一步就被推进压缩，
+    # 不依赖工具调用触发；正常体量时这里只做一次 token 估算即通过）
+    _threshold = int(_get_context_window(db, provider_id) * 0.5)
+    if TokenEstimator.estimate_messages(messages) > _threshold:
+        messages, _ctype = await _advance_compaction_boundary(
+            db, task, steps, messages, context, provider_id,
+            threshold=_threshold, mode="chat",
+        )
 
     # 2. 追加用户消息
     messages.append({"role": "user", "content": user_message})
@@ -6966,17 +7891,25 @@ async def run_subagent(
                     })
 
                 # ===== 上下文管理：子 Agent 动态压缩 =====
-                # 每 5 步检查 messages 大小，超预算时压缩（与 chat_with_agent 一致）
+                # 每 5 步检查，超 context_window×50% 才压缩一次（对齐主循环分界线语义）。
+                # 复用 AutoCompact 三层（session_memory → LLM → deterministic），
+                # 保留最近 10 条原文——刚拿到的证据不进摘要；压缩后消息纯追加，
+                # 前缀稳定命中缓存。子 Agent 无独立 steps，不走固化分界线，
+                # 直接在内存消息上推进。
                 if step_num > 0 and step_num % 5 == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    if current_tokens > HOT_BUDGET_TOKENS + 2000:
-                        assembler = ContextAssembler()
+                    threshold = int(_get_context_window(db, provider_id) * 0.5)
+                    if current_tokens > threshold:
                         before_tokens = current_tokens
-                        messages = assembler.compress_messages(messages, pentest_context=context)
+                        messages, ctype = await _auto_compact_messages(
+                            messages, db=db, provider_id=provider_id,
+                            key=f"subagent_{parent_task_id}_{role_name}",
+                            keep_recent=10, pentest_context=context,
+                        )
                         after_tokens = TokenEstimator.estimate_messages(messages)
                         if before_tokens > after_tokens:
                             logger.info(
-                                f"子 Agent [{role_name}] 动态压缩: {before_tokens} → {after_tokens} tokens "
+                                f"子 Agent [{role_name}] 动态压缩({ctype}): {before_tokens} → {after_tokens} tokens "
                                 f"(节省 {before_tokens - after_tokens}, step={step_num})"
                             )
 
@@ -7352,17 +8285,22 @@ async def run_coordinator_task(
                 })
 
             # ===== 上下文管理：指挥官动态压缩 =====
-            # 每 5 步检查 messages 大小，超预算时压缩
+            # 每 5 步检查，超 context_window×50% 才压缩一次（与主循环/子 Agent 同一语义），
+            # 复用 AutoCompact 三层并保留最近 10 条原文，压缩后纯追加保前缀缓存
             if step_num > 0 and step_num % 5 == 0:
                 current_tokens = TokenEstimator.estimate_messages(messages)
-                if current_tokens > HOT_BUDGET_TOKENS + 2000:
-                    assembler = ContextAssembler()
+                threshold = int(_get_context_window(db, None) * 0.5)
+                if current_tokens > threshold:
                     before_tokens = current_tokens
-                    messages = assembler.compress_messages(messages, pentest_context=context)
+                    messages, ctype = await _auto_compact_messages(
+                        messages, db=db, provider_id=None,
+                        key=f"coordinator_{task_id}",
+                        keep_recent=10, pentest_context=context,
+                    )
                     after_tokens = TokenEstimator.estimate_messages(messages)
                     if before_tokens > after_tokens:
                         logger.info(
-                            f"指挥官动态压缩: {before_tokens} → {after_tokens} tokens "
+                            f"指挥官动态压缩({ctype}): {before_tokens} → {after_tokens} tokens "
                             f"(节省 {before_tokens - after_tokens}, step={step_num})"
                         )
 

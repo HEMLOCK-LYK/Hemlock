@@ -184,3 +184,53 @@ async def replay_flow(flow_id: str, db: Session = Depends(get_db)):
         resp_headers=new_flow.resp_headers,
         resp_body=new_flow.resp_body,
     )
+
+
+class MigrateAuthRequest(BaseModel):
+    """登录态迁移请求：目标 Agent 会话由 task_id 推导（session_id = agent_{task_id}）。
+
+    task_id 缺省时自动选该流量所属项目最近开始的任务——右键迁移不该让用户填表单。
+    """
+    task_id: str | None = None
+
+
+@router.post("/flows/{flow_id}/migrate-auth")
+async def migrate_flow_auth(flow_id: str, req: MigrateAuthRequest, db: Session = Depends(get_db)):
+    """把流量请求头中的认证信息一键迁移到 AI 会话（设计稿第一期，来源 B）。
+
+    用户主动动作（右键即确认，与 run_command 同级的人工确认已由交互承担）。
+    凭据只进 session_manager 内存：不落盘、不进日志，返回值不回显完整凭据。
+    迁移成功后立即主动探测一次，报告登录态有效性。
+    """
+    from hemlock.models.flow import Flow
+    from hemlock.models.task import Task
+    from hemlock.services.session_service import migrate_flow_auth_to_session, validate_migrated_session
+
+    flow = db.query(Flow).filter(Flow.id == flow_id).first()
+    if not flow:
+        raise HTTPException(status_code=404, detail="Flow not found")
+
+    task_id = req.task_id
+    if not task_id:
+        task = (
+            db.query(Task)
+            .filter(Task.project_id == flow.project_id)
+            .order_by(Task.started_at.desc())
+            .first()
+        )
+        if not task:
+            return {
+                "migrated": False,
+                "error": "当前项目还没有 AI 对话任务，先创建一个对话再迁移",
+            }
+        task_id = task.id
+
+    session_id = f"agent_{task_id}"
+    result = migrate_flow_auth_to_session(flow, session_id)
+    if not result.get("migrated"):
+        return result
+
+    # 主动验证（设计稿 §5）：GET 原请求 URL（登录后浏览过的页面最能代表登录态）；非 GET 用首页
+    probe_url = flow.url if (flow.method or "GET").upper() == "GET" else f"{flow.scheme or 'http'}://{flow.host or ''}/"
+    validation = await validate_migrated_session(session_id, probe_url)
+    return {**result, "validation": validation}
