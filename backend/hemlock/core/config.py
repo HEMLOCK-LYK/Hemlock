@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # 对之后新开的浏览器进程生效。
     browser_headed: bool = False
 
+    # 上下文压缩阈值（tokens，绝对值）：对话历史累积超过该值才推进一次压缩分界线。
+    # 与模型上下文窗口解耦——1M 窗口的模型按比例会在 800K 才压缩，早期对话太长
+    # 会导致摘要失真严重，故用绝对值控制累积上限。预设 200K/400K/600K/1M，
+    # 默认 200K，推荐 400K。实际触发取 min(本值, 模型窗口 × 0.8)。
+    compact_limit_tokens: int = 200_000
+
     @property
     def db_url(self) -> str:
         db = Path(self.db_path)

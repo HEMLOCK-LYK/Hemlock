@@ -7,12 +7,19 @@
 - frontmatter 之后的正文 = 记忆内容（content）
 - 文件存在即生效，删除文件即移除——无需数据库
 
-目录结构：
+目录结构（两大类）：
     ~/.hemlock/memories/
-    ├── global/              # 全局记忆（user/feedback/reference 类型）
+    ├── global/              # 长期记忆 — 经验（user/feedback/reference 类型）
     │   ├── waf-encoding-bypass.md
     │   └── user-prefers-minimal-payloads.md
-    └── projects/            # 项目级记忆（project 类型）
+    ├── kb/                  # 长期记忆 — 知识库（按库分目录，库名/库类型由使用者或
+    │   │                   #   Agent 自定，如 绕waf实战技巧 / nday利用指南 / 0day库）
+    │   ├── waf-bypass/
+    │   │   ├── _meta.json   # 库描述（name/description/created_at）
+    │   │   └── double-url-encode.md
+    │   └── nday-guide/
+    │       └── shiro-cve-2016-4437.md
+    └── projects/            # 项目记忆（project 类型，仅本项目内注入）
         └── proj_abc123/
             └── target-api-rate-limit.md
 
@@ -29,6 +36,7 @@
     [[sql-injection-strategy]]
 """
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -43,6 +51,7 @@ logger = logging.getLogger(__name__)
 # 记忆文件根目录
 MEMORIES_DIR = get_data_dir() / "memories"
 GLOBAL_DIR = MEMORIES_DIR / "global"
+KB_DIR = MEMORIES_DIR / "kb"
 PROJECTS_DIR = MEMORIES_DIR / "projects"
 
 # 记忆类型
@@ -50,11 +59,15 @@ MEMORY_TYPE_USER = "user"
 MEMORY_TYPE_FEEDBACK = "feedback"
 MEMORY_TYPE_PROJECT = "project"
 MEMORY_TYPE_REFERENCE = "reference"
+MEMORY_TYPE_KB = "kb"  # 知识库条目（kb/ 目录，库 = 用户自定义分类）
 
-MEMORY_TYPES = (MEMORY_TYPE_USER, MEMORY_TYPE_FEEDBACK, MEMORY_TYPE_PROJECT, MEMORY_TYPE_REFERENCE)
+MEMORY_TYPES = (MEMORY_TYPE_USER, MEMORY_TYPE_FEEDBACK, MEMORY_TYPE_PROJECT, MEMORY_TYPE_REFERENCE, MEMORY_TYPE_KB)
 
 # 全局类型（存在 global/ 目录）
 GLOBAL_TYPES = {MEMORY_TYPE_USER, MEMORY_TYPE_FEEDBACK, MEMORY_TYPE_REFERENCE}
+
+# 知识库快照单库最大列出条目数（超过只列最近更新的，其余靠 get_memory 检索）
+KB_SNAPSHOT_MAX_ENTRIES = 100
 
 
 @dataclass
@@ -68,6 +81,7 @@ class MemoryFile:
     content: str = ""
     file_path: Path = None  # type: ignore
     project_id: str | None = None
+    kb: str | None = None  # 知识库条目所属库名（type=kb 时非空）
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -82,12 +96,26 @@ class MemoryFile:
 def _ensure_dirs() -> None:
     """确保记忆目录结构存在。"""
     GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
+    KB_DIR.mkdir(parents=True, exist_ok=True)
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _get_dir_for_type(mem_type: str, project_id: str | None = None) -> Path:
-    """根据记忆类型返回对应目录。"""
+def _entry_dir(mem_type: str, project_id: str | None = None, kb: str | None = None) -> Path:
+    """根据记忆类型返回条目所在目录。
+
+    - 经验类型（user/feedback/reference）→ global/
+    - 知识库条目（kb）→ kb/{库名}/（库不存在时抛 ValueError，建库走 create_kb）
+    - 项目记忆（project）→ projects/{project_id}/
+    """
     _ensure_dirs()
+    if mem_type == MEMORY_TYPE_KB:
+        if not kb:
+            raise ValueError("知识库条目必须指定知识库名（kb）")
+        safe_kb = _safe_name(kb)
+        kb_path = KB_DIR / safe_kb
+        if not kb_path.is_dir():
+            raise ValueError(f"知识库不存在: {kb}（可先创建）")
+        return kb_path
     if mem_type in GLOBAL_TYPES:
         return GLOBAL_DIR
     # project 类型 → projects/{project_id}/
@@ -97,7 +125,12 @@ def _get_dir_for_type(mem_type: str, project_id: str | None = None) -> Path:
     return proj_dir
 
 
-def _scan_dir(directory: Path, project_id: str | None = None) -> list[MemoryFile]:
+# 向后兼容：旧调用方（_get_dir_for_type）语义保留
+def _get_dir_for_type(mem_type: str, project_id: str | None = None) -> Path:
+    return _entry_dir(mem_type, project_id)
+
+
+def _scan_dir(directory: Path, project_id: str | None = None, kb: str | None = None) -> list[MemoryFile]:
     """扫描目录下所有 .md 文件，返回解析后的记忆列表。"""
     if not directory.exists():
         return []
@@ -107,6 +140,8 @@ def _scan_dir(directory: Path, project_id: str | None = None) -> list[MemoryFile
         if mem:
             if project_id:
                 mem.project_id = project_id
+            if kb:
+                mem.kb = kb
             memories.append(mem)
     return memories
 
@@ -176,6 +211,8 @@ def _parse_memory_file(path: Path) -> MemoryFile | None:
             trigger=trigger,
             content=body,
             file_path=path,
+            # kb 归属从路径推导（kb/{库名}/{条目}.md），get_memory 按名查找时也能带上
+            kb=(path.parent.name if path.parent.parent == KB_DIR else None),
             created_at=created,
             updated_at=updated,
         )
@@ -224,6 +261,7 @@ def _memory_to_dict(mem: MemoryFile) -> dict[str, Any]:
         "trigger": mem.trigger,
         "content": mem.content,
         "project_id": mem.project_id,
+        "kb": mem.kb,
         "created_at": mem.created_at,
         "updated_at": mem.updated_at,
     }
@@ -237,6 +275,7 @@ def create_memory(
     trigger_list: list[str] | None = None,
     content: str = "",
     project_id: str | None = None,
+    kb: str | None = None,
 ) -> MemoryFile:
     """创建记忆 .md 文件。
 
@@ -244,10 +283,11 @@ def create_memory(
         db: 保留参数兼容已有调用方，实际不使用。
         name: 唯一名称（文件名）
         description: 一句话描述
-        type: 记忆类型 (user/feedback/project/reference)
+        type: 记忆类型 (user/feedback/project/reference/kb)
         trigger_list: 触发关键词列表
         content: 记忆正文
         project_id: 关联项目 ID（project 类型用）
+        kb: 知识库名（type=kb 时必填；传入 kb 时 type 自动置为 kb）
 
     Returns:
         创建的 MemoryFile 对象
@@ -255,11 +295,15 @@ def create_memory(
     Raises:
         ValueError: 名称已存在或类型非法
     """
+    if kb:
+        type = MEMORY_TYPE_KB
     if type not in MEMORY_TYPES:
         raise ValueError(f"非法的记忆类型 '{type}'，允许: {', '.join(MEMORY_TYPES)}")
+    if type == MEMORY_TYPE_KB and not kb:
+        raise ValueError("知识库条目必须指定知识库名（kb）")
 
     safe = _safe_name(name)
-    target_dir = _get_dir_for_type(type, project_id)
+    target_dir = _entry_dir(type, project_id, kb)
     file_path = target_dir / f"{safe}.md"
 
     if file_path.exists():
@@ -270,11 +314,12 @@ def create_memory(
 
     file_content = _build_file_content(type, description, trigger_list, content)
     file_path.write_text(file_content, encoding="utf-8")
-    logger.info(f"创建记忆文件: {safe}.md (type={type})")
+    logger.info(f"创建记忆文件: {safe}.md (type={type}, kb={kb or '-'})")
 
     mem = _parse_memory_file(file_path)
     if mem:
         mem.project_id = project_id if type == MEMORY_TYPE_PROJECT else None
+        mem.kb = kb if type == MEMORY_TYPE_KB else None
     return mem  # type: ignore
 
 
@@ -306,6 +351,14 @@ def update_memory(db: Any = None, memory_id: str = "", **kwargs) -> MemoryFile:
     new_description = kwargs.get("description", old_mem.description)
     new_content = kwargs.get("content", old_mem.content)
     new_project_id = kwargs.get("project_id", old_mem.project_id)
+    # kb 归属：显式传 kb 以新值为准；显式把 type 改出 kb 时清除旧库归属
+    new_kb = kwargs["kb"] if "kb" in kwargs else old_mem.kb
+    if "type" in kwargs and kwargs["type"] != MEMORY_TYPE_KB:
+        new_kb = kwargs.get("kb")
+    if new_kb:
+        new_type = MEMORY_TYPE_KB
+    if new_type == MEMORY_TYPE_KB and not new_kb:
+        raise ValueError("知识库条目必须指定知识库名（kb）")
 
     if "trigger_list" in kwargs:
         new_trigger = kwargs["trigger_list"]
@@ -319,7 +372,7 @@ def update_memory(db: Any = None, memory_id: str = "", **kwargs) -> MemoryFile:
     new_safe = _safe_name(new_name)
 
     # 确定目标目录
-    target_dir = _get_dir_for_type(new_type, new_project_id)
+    target_dir = _entry_dir(new_type, new_project_id, new_kb)
     new_path = target_dir / f"{new_safe}.md"
 
     # 写入新内容
@@ -334,6 +387,7 @@ def update_memory(db: Any = None, memory_id: str = "", **kwargs) -> MemoryFile:
     mem = _parse_memory_file(new_path)
     if mem:
         mem.project_id = new_project_id if new_type == MEMORY_TYPE_PROJECT else None
+        mem.kb = new_kb if new_type == MEMORY_TYPE_KB else None
     return mem  # type: ignore
 
 
@@ -361,13 +415,20 @@ def get_memory(db: Any = None, memory_id: str = "") -> MemoryFile | None:
 
 
 def _find_memory_file(name: str) -> Path | None:
-    """在所有目录中查找记忆文件。"""
+    """在所有目录中查找记忆文件（global / kb 各库 / projects 各项目）。"""
     safe = _safe_name(name)
     # 先查 global
     path = GLOBAL_DIR / f"{safe}.md"
     if path.exists():
         return path
-    # 再查 projects 下所有子目录
+    # 再查知识库各库目录
+    if KB_DIR.exists():
+        for kb_dir in KB_DIR.iterdir():
+            if kb_dir.is_dir():
+                p = kb_dir / f"{safe}.md"
+                if p.exists():
+                    return p
+    # 最后查 projects 下所有子目录
     if PROJECTS_DIR.exists():
         for proj_dir in PROJECTS_DIR.iterdir():
             if proj_dir.is_dir():
@@ -381,19 +442,36 @@ def list_memories(
     db: Any = None,
     type_filter: str | None = None,
     project_id: str | None = None,
+    kb_filter: str | None = None,
 ) -> list[MemoryFile]:
-    """列出记忆，支持按类型和项目过滤。"""
+    """列出记忆，支持按类型、知识库和项目过滤。
+
+    kb_filter 指定时只返回该库的条目；type_filter=kb 时返回所有库的条目。
+    """
     _ensure_dirs()
     memories = []
 
-    # 扫描 global 目录
-    for mem in _scan_dir(GLOBAL_DIR):
-        if type_filter and mem.type != type_filter:
-            continue
-        memories.append(mem)
+    # 知识库条目（kb/{库}/*.md）——始终扫描，库内按 kb_filter 过滤
+    if KB_DIR.exists():
+        for kb_dir in sorted(KB_DIR.iterdir()):
+            if not kb_dir.is_dir():
+                continue
+            if kb_filter and kb_dir.name != kb_filter:
+                continue
+            for mem in _scan_dir(kb_dir, kb=kb_dir.name):
+                if type_filter and mem.type != type_filter:
+                    continue
+                memories.append(mem)
 
-    # 扫描 projects 目录
-    if PROJECTS_DIR.exists():
+    # 经验（global）
+    if not kb_filter:
+        for mem in _scan_dir(GLOBAL_DIR):
+            if type_filter and mem.type != type_filter:
+                continue
+            memories.append(mem)
+
+    # 项目记忆（projects）
+    if not kb_filter and PROJECTS_DIR.exists():
         for proj_dir in sorted(PROJECTS_DIR.iterdir()):
             if not proj_dir.is_dir():
                 continue
@@ -414,6 +492,136 @@ def get_memory_index(db: Any = None) -> list[dict[str, Any]]:
     """返回所有记忆的摘要索引（name + description + trigger）。"""
     memories = list_memories(db)
     return [_memory_to_dict(m) for m in memories]
+
+
+# ===== 知识库管理 =====
+
+def _kb_meta_path(kb_name: str) -> Path:
+    return KB_DIR / _safe_name(kb_name) / "_meta.json"
+
+
+def _read_kb_meta(kb_name: str) -> dict[str, Any]:
+    """读取库元信息（缺失时返回空描述）。"""
+    meta_path = _kb_meta_path(kb_name)
+    try:
+        if meta_path.exists():
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def list_kbs(db: Any = None) -> list[dict[str, Any]]:
+    """列出所有知识库（按名称排序，确定性输出）。
+
+    返回: [{name, description, entry_count, updated_at}]
+    """
+    _ensure_dirs()
+    kbs = []
+    if not KB_DIR.exists():
+        return kbs
+    for kb_dir in sorted(KB_DIR.iterdir()):
+        if not kb_dir.is_dir():
+            continue
+        entries = _scan_dir(kb_dir, kb=kb_dir.name)
+        meta = _read_kb_meta(kb_dir.name)
+        # 库更新时间 = 库内条目最新 mtime（无条目时取目录 mtime）
+        if entries:
+            updated = max(e.updated_at or "" for e in entries)
+        else:
+            updated = datetime.fromtimestamp(kb_dir.stat().st_mtime, tz=timezone.utc).isoformat()
+        kbs.append({
+            "name": kb_dir.name,
+            "description": meta.get("description", ""),
+            "entry_count": len(entries),
+            "updated_at": updated,
+        })
+    return kbs
+
+
+def create_kb(name: str, description: str = "") -> dict[str, Any]:
+    """创建知识库（kb/{安全化名}/ 目录 + _meta.json）。
+
+    Raises:
+        ValueError: 名称非法或已存在
+    """
+    _ensure_dirs()
+    safe = _safe_name(name)
+    kb_path = KB_DIR / safe
+    if kb_path.exists():
+        raise ValueError(f"知识库 '{safe}' 已存在")
+    kb_path.mkdir(parents=True)
+    meta = {
+        "name": safe,
+        "description": description.strip(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    (kb_path / "_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info(f"创建知识库: {safe}")
+    return {"name": safe, "description": meta["description"], "entry_count": 0}
+
+
+def delete_kb(name: str) -> bool:
+    """删除知识库（连同库内全部条目）。"""
+    safe = _safe_name(name)
+    kb_path = KB_DIR / safe
+    if not kb_path.is_dir():
+        raise ValueError(f"知识库不存在: {safe}")
+    import shutil
+    shutil.rmtree(kb_path)
+    logger.info(f"删除知识库: {safe}")
+    return True
+
+
+def search_kb_entries(
+    db: Any = None,
+    kb: str = "",
+    query: str = "",
+    n_results: int = 20,
+) -> list[dict[str, Any]]:
+    """在指定知识库内按子串检索条目（匹配 name/description/trigger/content）。
+
+    供 Agent 在快照未列出所需条目时按需发现（get_memory 工具的 kb 检索模式）。
+    确定性排序：命中字段权重（name > description > trigger > content）+ 名称排序。
+    """
+    if not kb:
+        return []
+    kb_name = _safe_name(kb)
+    kb_dir = KB_DIR / kb_name
+    if not kb_dir.is_dir():
+        return []
+
+    q = query.strip().lower()
+    results: list[tuple[int, str, dict[str, Any]]] = []
+    for mem in _scan_dir(kb_dir, kb=kb_name):
+        item = _memory_to_dict(mem)
+        if not q:
+            item["match_field"] = "all"
+            results.append((4, mem.name, item))
+            continue
+        content_l = (mem.content or "").lower()
+        if q in mem.name.lower():
+            weight = 4
+            item["match_field"] = "name"
+        elif q in (mem.description or "").lower():
+            weight = 3
+            item["match_field"] = "description"
+        elif any(q in t.lower() for t in mem.trigger):
+            weight = 2
+            item["match_field"] = "trigger"
+        elif q in content_l:
+            weight = 1
+            item["match_field"] = "content"
+        else:
+            continue
+        results.append((weight, mem.name, item))
+
+    results.sort(key=lambda x: (-x[0], x[1]))
+    return [r[2] for r in results[:max(1, n_results)]]
 
 
 def format_memory_for_prompt(memories: list) -> str:
@@ -496,44 +704,87 @@ def build_memories_prompt(
 
 
 def build_memory_snapshot(db: Any = None, project_id: str | None = None) -> str:
-    """构建对话开始时的记忆快照（分级过滤：仅 global + 当前 project）。
+    """构建对话开始时的记忆快照（两大类：经验 + 知识库）。
+
+    分级过滤：
+    - 经验：global 目录（user/feedback/reference）+ 指定 project 目录
+      （project_id 为空时不加载项目级记忆，避免跨项目串扰）
+    - 知识库：kb/ 下所有库的条目索引（跨项目长期积累，日积月累）
 
     快照在对话开始时生成一次并固化到 task.memory_snapshot，期间不可变——
     中途 save_memory 不回流，保证快照消息逐字节稳定、可被前缀缓存命中。
+    知识库条目单库超过 KB_SNAPSHOT_MAX_ENTRIES 时只列最近更新的，其余靠
+    get_memory 的 kb 检索模式按需发现。
 
     Returns:
-        格式化快照文本，无记忆时返回空字符串
+        格式化快照文本，无任何记忆时返回空字符串
     """
     if project_id:
         memories = list_memories(db, project_id=project_id)
     else:
         _ensure_dirs()
         memories = _scan_dir(GLOBAL_DIR)
-    if not memories:
-        return ""
 
-    index = format_memory_for_prompt(memories)
-    return (
-        "## 长期记忆（对话开始时的快照，跨会话保留）\n"
-        "以下是本对话开始时已沉淀的经验索引。快照在对话开始后不再更新，"
-        "与当前任务有关时用 get_memory 工具读取其完整内容：\n"
-        + index
-    )
+    sections: list[str] = []
+    if memories:
+        sections.append(
+            "## 长期记忆（对话开始时的快照，跨会话保留）\n"
+            "以下是本对话开始时已沉淀的经验索引。快照在对话开始后不再更新，"
+            "与当前任务有关时用 get_memory 工具读取其完整内容：\n"
+            + format_memory_for_prompt(memories)
+        )
+
+    # 知识库索引（每个库一段：库名 + 描述 + 条目列表）
+    kbs = list_kbs(db)
+    if kbs:
+        lines = [
+            "## 知识库索引（长期积累的实战知识，跨会话保留）\n"
+            "以下是使用者与 Agent 日积月累记录的知识库。条目相关知识可用 "
+            "get_memory 按名称读取全文；需要检索时传 kb + query 做库内搜索；"
+            "沉淀新知识用 save_memory 并指定 kb：\n"
+        ]
+        for kb in kbs:
+            kb_name = kb["name"]
+            desc = f"—— {kb['description']}" if kb["description"] else ""
+            entries = [m for m in list_memories(db, kb_filter=kb_name)]
+            # 最近更新的排前面（确定性：updated_at 相同再按名称排序）
+            entries.sort(key=lambda m: (m.updated_at or "", m.name), reverse=True)
+            header = f"### {kb_name}（{len(entries)} 条）{desc}"
+            lines.append(header)
+            if not entries:
+                lines.append("（暂无条目）")
+            else:
+                for e in entries[:KB_SNAPSHOT_MAX_ENTRIES]:
+                    d = e.description or ""
+                    if len(d) > 80:
+                        d = d[:80].rstrip() + "…"
+                    lines.append(f"- **{e.name}** {d}")
+                if len(entries) > KB_SNAPSHOT_MAX_ENTRIES:
+                    lines.append(
+                        f"（仅显示最近更新的 {KB_SNAPSHOT_MAX_ENTRIES} 条，共 {len(entries)} 条，"
+                        f"其余用 get_memory 传 kb+query 检索）"
+                    )
+            lines.append("")
+        sections.append("\n".join(lines).rstrip())
+
+    return "\n\n".join(sections)
 
 
 def search_by_trigger(db: Any = None, text: str = "", n_results: int = 5) -> list[dict[str, Any]]:
-    """根据输入文本匹配 trigger 关键词，返回相关记忆。
+    """根据输入文本检索记忆，返回相关记忆。
 
-    保留此函数兼容 API，但实际匹配由 LLM 在全量加载后自行完成。
+    匹配字段：trigger 关键词 > name > description > content（子串匹配，
+    中文子串、英文整词）。结果按命中字段权重 + 匹配数排序。
     """
     memories = list_memories(db)
     results = []
+    text_lower = text.lower().strip()
+    if not text_lower:
+        return results
 
     for mem in memories:
-        if not mem.trigger:
-            continue
         matched = []
-        text_lower = text.lower()
+        weight = 0
         for kw in mem.trigger:
             kw_lower = kw.lower()
             # 中文子串匹配，英文整词匹配
@@ -545,11 +796,22 @@ def search_by_trigger(db: Any = None, text: str = "", n_results: int = 5) -> lis
                 pattern = r'\b' + re.escape(kw_lower) + r'\b'
                 if re.search(pattern, text_lower):
                     matched.append(kw)
+        if matched:
+            weight = 4 + len(matched)
+        elif text_lower in mem.name.lower():
+            weight = 3
+            matched.append(mem.name)
+        elif text_lower in (mem.description or "").lower():
+            weight = 2
+            matched.append("description")
+        elif text_lower in (mem.content or "").lower():
+            weight = 1
+            matched.append("content")
 
         if matched:
             item = _memory_to_dict(mem)
             item["matched_triggers"] = matched
-            item["match_count"] = len(matched)
+            item["match_count"] = weight
             results.append(item)
 
     results.sort(key=lambda x: x["match_count"], reverse=True)

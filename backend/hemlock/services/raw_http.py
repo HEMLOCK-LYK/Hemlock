@@ -177,7 +177,8 @@ def build_raw_request_from_flow(flow) -> str:
 
     请求行用相对路径（含 query），与前端 httpParser/buildRawRequest 格式一致；
     body 用原始文本（不格式化），保证「所见即所得」——编辑后放行就是发送这个字节流。
-    缺失 Host 头时补一个（HTTP/1.1 必需，否则相对路径请求行放行时无法解析）。
+    缺失 Host 头时补一个（HTTP/1.1 必需，否则相对路径请求行放行时无法解析），
+    插到头部区首位——与浏览器 HTTP/1.1 的头顺序一致（Host 紧跟请求行）。
     """
     req = flow.request
     http_version = getattr(req, "http_version", "") or "HTTP/1.1"
@@ -185,7 +186,7 @@ def build_raw_request_from_flow(flow) -> str:
     if not any(k.lower() == "host" for k in req.headers.keys()):
         host_header = _flow_host_header(req)
         if host_header:
-            headers_str = (headers_str + "\n" if headers_str else "") + f"Host: {host_header}"
+            headers_str = f"Host: {host_header}" + ("\n" + headers_str if headers_str else "")
     body = req.get_text(strict=False) or ""
     return build_raw_request(req.method, req.path, http_version, headers_str, body)
 

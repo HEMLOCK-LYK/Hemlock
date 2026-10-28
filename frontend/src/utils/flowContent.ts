@@ -1,6 +1,28 @@
 import type { Flow } from "../types";
 import { formatBody, extractContentType } from "./bodyFormatter";
 
+/** 从 URL 提取 host（含端口），失败返回空串 */
+function hostFromUrl(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 补齐 Host 头：HTTP/2 抓包没有 Host 头（目标在 :authority 伪头部），
+ * 旧版本入库的记录 req_headers 里缺 Host——展示时从 URL 推导，
+ * 插到头部区首位（与浏览器 HTTP/1.1 的头顺序一致）。
+ */
+function ensureHostHeader(headers: string, url: string): string {
+  if (/^host\s*:/im.test(headers)) return headers;
+  const host = hostFromUrl(url);
+  if (!host) return headers;
+  const trimmed = headers.replace(/\n+$/, "");
+  return trimmed ? `Host: ${host}\n${trimmed}` : `Host: ${host}`;
+}
+
 /** 构建请求原始文本（自动格式化 body） */
 export function buildRequestContent(flow: Flow): string {
   let path = flow.url;
@@ -11,7 +33,7 @@ export function buildRequestContent(flow: Flow): string {
     // ignore — use full URL as path
   }
   const requestLine = `${flow.method} ${path} HTTP/1.1`;
-  const headers = (flow.req_headers || "").replace(/\n+$/, "");
+  const headers = ensureHostHeader((flow.req_headers || "").replace(/\n+$/, ""), flow.url);
   const rawBody = flow.req_body || "";
   if (rawBody) {
     const ct = extractContentType(headers);

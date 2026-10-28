@@ -19,10 +19,11 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 class MemoryCreateRequest(BaseModel):
     name: str
     description: str
-    type: str  # user/feedback/project/reference
+    type: str  # user/feedback/project/reference/kb
     trigger: list[str] = []
     content: str = ""
     project_id: str | None = None
+    kb: str | None = None  # 知识库名（type=kb 时必填；传入时 type 自动置为 kb）
 
 
 class MemoryUpdateRequest(BaseModel):
@@ -32,6 +33,7 @@ class MemoryUpdateRequest(BaseModel):
     trigger: list[str] | None = None
     content: str | None = None
     project_id: str | None = None
+    kb: str | None = None
 
 
 class MemorySearchRequest(BaseModel):
@@ -39,21 +41,58 @@ class MemorySearchRequest(BaseModel):
     n_results: int = 5
 
 
+class KBCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
 # ===== API 端点 =====
-# 注意：固定路径 (/index, /search) 必须在参数路径 (/{memory_id}) 之前定义
+# 注意：固定路径 (/index, /search, /kb) 必须在参数路径 (/{memory_id}) 之前定义
 
 @router.get("")
 async def list_memories(
-    type: str | None = Query(None, description="按类型过滤: user/feedback/project/reference"),
+    type: str | None = Query(None, description="按类型过滤: user/feedback/project/reference/kb"),
     project_id: str | None = Query(None, description="按项目 ID 过滤"),
+    kb: str | None = Query(None, description="按知识库名过滤"),
     db: Session = Depends(get_db),
 ):
-    """列出所有记忆，支持按类型和项目过滤。"""
-    memories = memory_manager.list_memories(db, type_filter=type, project_id=project_id)
+    """列出所有记忆，支持按类型、知识库和项目过滤。"""
+    memories = memory_manager.list_memories(db, type_filter=type, project_id=project_id, kb_filter=kb)
     return {
         "memories": [memory_manager._memory_to_dict(m) for m in memories],
         "total": len(memories),
     }
+
+
+# ===== 知识库管理 =====
+
+@router.get("/kb")
+async def list_kbs(db: Session = Depends(get_db)):
+    """列出所有知识库（name/description/entry_count/updated_at）。"""
+    kbs = memory_manager.list_kbs(db)
+    return {"kbs": kbs, "total": len(kbs)}
+
+
+@router.post("/kb")
+async def create_kb(req: KBCreateRequest, db: Session = Depends(get_db)):
+    """创建知识库（按库类型自定义分类，如 绕waf实战技巧 / nday利用指南 / 0day库）。"""
+    try:
+        kb = memory_manager.create_kb(req.name, req.description)
+        return {**kb, "message": "知识库创建成功"}
+    except ValueError as e:
+        if "已存在" in str(e):
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/kb/{kb_name}")
+async def delete_kb(kb_name: str, db: Session = Depends(get_db)):
+    """删除知识库（连同库内全部条目，前端应有二次确认）。"""
+    try:
+        memory_manager.delete_kb(kb_name)
+        return {"message": "知识库已删除"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/index")
@@ -72,7 +111,7 @@ async def search_memories(req: MemorySearchRequest, db: Session = Depends(get_db
 
 @router.post("")
 async def create_memory(req: MemoryCreateRequest, db: Session = Depends(get_db)):
-    """创建记忆条目（写入 .md 文件）。name 必须唯一。"""
+    """创建记忆条目（写入 .md 文件）。name 必须唯一；传 kb 时写入知识库。"""
     try:
         memory = memory_manager.create_memory(
             db=db,
@@ -82,6 +121,7 @@ async def create_memory(req: MemoryCreateRequest, db: Session = Depends(get_db))
             trigger_list=req.trigger,
             content=req.content,
             project_id=req.project_id,
+            kb=req.kb,
         )
         return {
             "id": memory.name,

@@ -45,6 +45,7 @@ CONFIGURABLE_KEYS = [
     "llm_assisted_verify_enabled",
     "sensitive_op_confirm",
     "browser_headed",
+    "compact_limit_tokens",
 ]
 
 # ===== 预设服务商（仅提供 base_url 快捷填充，模型由用户自行输入）=====
@@ -115,6 +116,7 @@ class SettingsResponse(BaseModel):
     llm_assisted_verify_enabled: bool
     sensitive_op_confirm: bool
     browser_headed: bool
+    compact_limit_tokens: int
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -138,6 +140,7 @@ class SettingsUpdateRequest(BaseModel):
     llm_assisted_verify_enabled: bool | None = None
     sensitive_op_confirm: bool | None = None
     browser_headed: bool | None = None
+    compact_limit_tokens: int | None = None
 
 
 class ProviderInfo(BaseModel):
@@ -262,6 +265,7 @@ def _build_settings_response(db: Session | None = None) -> SettingsResponse:
         llm_assisted_verify_enabled=merged.get("llm_assisted_verify_enabled", False),
         sensitive_op_confirm=merged.get("sensitive_op_confirm", True),
         browser_headed=merged.get("browser_headed", False),
+        compact_limit_tokens=merged.get("compact_limit_tokens", 200_000),
     )
 
 

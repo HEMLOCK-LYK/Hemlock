@@ -214,28 +214,29 @@ def test_auto_verify_runs_rules_when_llm_assist_disabled(tmp_path, monkeypatch):
 
 # ===== 上下文管理：缓存友好 + 微压缩 =====
 
-def test_context_assembler_keeps_system_stable(tmp_path, monkeypatch):
-    """system prompt 不随测试进度变化（缓存前缀稳定，不注入温记忆）。"""
-    from hemlock.core.context_manager import ContextAssembler
-    from hemlock.core.pentest_context import PentestContext
+def test_deterministic_boundary_compact_shape(tmp_path, monkeypatch):
+    """确定性边界压缩：system 原样保留 + 单条 boundary + 最近原文，不改写历史消息。"""
+    from hemlock.services.agent_service import _deterministic_boundary_compact
 
-    asm = ContextAssembler()
     base = "稳定系统提示"
-    messages = [
-        {"role": "system", "content": base},
-        {"role": "user", "content": "帮我测试"},
+    old_msgs = [
+        {"role": "user", "content": f"历史消息 {i} " + "x" * 300}
+        for i in range(20)
     ]
+    recent_msgs = [
+        {"role": "user", "content": "最近的问题"},
+        {"role": "assistant", "content": "最近的回答"},
+    ]
+    messages = [{"role": "system", "content": base}, *old_msgs, *recent_msgs]
 
-    ctx1 = PentestContext("http://example.com")
-    ctx1.authenticated = True
-    ctx1.record_finding(vuln_type="XSS", severity="high", title="t", endpoint="/x")
-    r1 = asm.assemble(base, messages, pentest_context=ctx1)
-
-    ctx2 = PentestContext("http://example.com")  # 上下文完全不同
-    r2 = asm.assemble(base, messages, pentest_context=ctx2)
-
-    assert r1[0]["content"] == r2[0]["content"]  # system 稳定
-    assert "测试上下文摘要" not in r1[0]["content"]  # 无温记忆注入
+    result, ctype = _deterministic_boundary_compact(messages, keep_recent=4)
+    assert ctype == "deterministic"
+    # 结构：system 原样 + 1 条 boundary + keep_recent 条原文
+    assert result[0]["content"] == base  # system 逐字节不变
+    assert len(result) == 1 + 1 + 4
+    assert "[上下文压缩]" in result[1]["content"]
+    # 最近原文逐字节保留（不蒸馏改写）
+    assert result[-2:] == recent_msgs
 
 
 def test_micro_compact_preserves_flow_id(tmp_path, monkeypatch):

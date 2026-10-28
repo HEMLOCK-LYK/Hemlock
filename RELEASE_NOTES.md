@@ -1,13 +1,11 @@
-# Hemlock v0.8.0 Release Notes
+# Hemlock v0.9.0 Release Notes
 
 ## 本版本亮点 / What's New
 
-- **攻击链自动构建 + 画布**：测试过程自动画出「SQL 注入 → 写 webshell → RCE」式危害串联图，画布横向主线布局（主路径从左到右、分支纵向展开、多路径汇入同一漏洞），可拖拽、连线、补节点
-- **跨链总览**：每条链一条横向泳道一屏看完，跨链同流量 / 同目标自动连虚线衔接，链与链不再孤岛
-- **攻击路径进报告**：确认后的攻击链自动拼进 HTML / Markdown 报告的「攻击路径」段
-- **登录态一键迁移**：流量列表右键把认证头迁给 AI 会话（凭据只进内存），会话失效时 Agent 自动感知、不再对着登录页瞎测
-- **FlowTag 检测化**：敏感信息 / 组件指纹标注检测等级，Agent 按线索定位可疑流量，不再逐包翻
-- **上下文与命令执行增强**：数据一次读全不反复补读、命令输出实时流式显示、超时终止不丢已产出输出
+- **知识库**：长期记忆新增体系化知识沉淀——按库分类（绕 WAF 实战技巧 / nday 成功利用指南 / 0day 库…），使用者在记忆页自建自管，Agent 也能在会话中沉淀新条目（库不存在自动创建），日积月累形成可复用的知识资产
+- **上下文压缩阈值可调**：预设 200K（默认）/ 400K（推荐）/ 600K / 1M，支持自定义——与模型窗口解耦，1M 模型不再按比例到 800K 才压缩，摘要质量与累积长度自己拍板
+- **缓存/压缩对齐 Claude Code**：压缩触发提到窗口 80%、移除热窗口滑窗改写，除压缩边界外对话历史永不变化、前缀缓存稳定命中，长任务 token 成本更低
+- **重放器 / 爆破器 / 抓包一批修复**：新建标签页可编辑、HTTP/2 流量 Host 头补齐并归位、爆破器支持导入 txt 字典 + 多标记位正确运行、浅色主题光标可见
 
 ## 中文说明
 
@@ -15,6 +13,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 核心特性
 
+- **知识库**：记忆系统分「长期记忆 / 项目记忆」两大类，长期记忆下按库沉淀实战知识（绕 WAF 技巧 / nday 指南 / 0day 记录），Agent 与使用者共同维护，快照注入 + 库内检索按需取用
 - **攻击链与危害串联**：Agent 的测试操作自动固化为攻击链（资产→漏洞→凭据→动作→获取），画布横向主线可视化（主干横穿、分支纵向展开）、节点拖拽布局、手工连线补依据；跨链总览一屏看完所有链的衔接关系（同流量 / 同目标）；确认后的链自动进报告
 - **登录态一键迁移**：流量列表右键「迁移认证头到 AI 会话」，凭据只进内存不落盘；会话被踢回登录页时自动标记失效，Agent 不再对着登录页瞎测
 - **FlowTag 轻量检测**：45 条内置规则标注检测等级（Shiro / 云 AK / 私钥 / SQL 报错回显 = high），Agent 按线索定位可疑流量与登录态候选
@@ -26,7 +25,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 - **攻击面发现工具**：`analyze_js` 从 JS 提取接口、`fuzz_paths` 路径字典爆破，指令驱动式深挖攻击面
 - **N-day 漏洞情报**：`cve_lookup` 按组件+版本查已知 CVE（NVD + cve.circl.lu），`web_search` 联网搜利用细节；先思考后查证，需要时才走代理
 - **上游代理出口**：Agent 请求（显式 `use_proxy`，默认直连防回环）、子进程环境变量、内置浏览器 `--proxy-server` 三条路径跟随上游代理，情报查询失败自动兜底
-- **上下文智能管理**：分界线固化压缩（恢复原文展开、前缀缓存稳定）+ 索引按需注入 + 渐进式压缩（Session Memory → LLM AutoCompact），长任务不爆上下文
+- **上下文智能管理**：分界线固化压缩（恢复原文展开、前缀缓存稳定）+ 索引按需注入 + 渐进式压缩（Session Memory → LLM AutoCompact）+ 压缩阈值可调（200K～1M 预设 / 自定义），长任务不爆上下文、token 成本可控
 - **checkpoint 断点续跑**：任务自动保存快照，崩溃或中断后可一键续跑
 - **多 Agent 协作**：5 个内置角色（侦察员/攻击手/验证员/情报员/报告员）共享渗透测试上下文，Coordinator 编排全流程；对话模式主 Agent 也可直接分工
 - **渐进式技能披露**：99 个内置安全技能，system prompt 只注入索引，完整指令按需加载
@@ -37,7 +36,7 @@ Hemlock 是一款**全栈一体化**渗透测试工具：AI Agent 自动渗透 +
 
 ### 安装方式
 
-1. 下载 `Hemlock_0.8.0_x64-setup.exe`
+1. 下载 `Hemlock_0.9.0_x64-setup.exe`
 2. 双击安装并启动
 3. 进入设置页面配置 LLM API Key（模型建议 `deepseek-v4-flash`）
 4. 启动抓包代理，浏览器配置代理并安装 CA 证书
@@ -58,6 +57,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 
 ### Key Features
 
+- **Knowledge Base**: memory now splits into "Long-term / Project" scopes; long-term memory organizes field knowledge into user-defined libraries (WAF bypass tricks / N-day exploitation guides / 0-day records), co-maintained by the user and the Agent (auto-creating libraries on the fly), injected as a stable snapshot with in-library search on demand
 - **Attack Chain & Impact Storytelling**: the Agent's operations are automatically compiled into an attack chain (asset → vuln → credential → action → loot); horizontal main-path canvas (longest path left→right, branches fanning vertically, multiple paths converging into the same vuln) with drag-and-drop layout and manual edges; cross-chain overview links chains sharing the same source traffic or target; confirmed chains are appended into HTML/Markdown reports as an "Attack Path" section
 - **One-Click Session Migration**: right-click a flow to migrate its auth headers into the AI session (credentials in memory only); when the session gets kicked back to a login page the Agent is told and stops testing a dead session
 - **FlowTag Lightweight Detection**: 45 built-in rules graded by severity (Shiro / cloud AK / private key / SQL error echo = high); the Agent locates suspicious traffic by clues instead of packet-by-packet review
@@ -69,7 +69,7 @@ Hemlock is a full-stack integrated penetration testing tool: AI Agent autonomous
 - **Attack Surface Discovery**: `analyze_js` extracts endpoints from JS, `fuzz_paths` brute-forces paths
 - **N-day Vulnerability Intelligence**: `cve_lookup` maps component+version to known CVEs (NVD + cve.circl.lu), `web_search` for exploit details; verify-then-search discipline, proxy only when needed
 - **Upstream Proxy, End to End**: Agent HTTP requests (explicit `use_proxy`, direct by default to avoid loops), subprocess environment injection, and the built-in browser (`--proxy-server`) all honor the configured upstream proxy; intel lookups fall back through the proxy automatically
-- **Smart Context Management**: fixed compaction boundary (original replay, stable cache prefix) + index-based injection + progressive compaction (Session Memory → LLM AutoCompact)
+- **Smart Context Management**: fixed compaction boundary (original replay, stable cache prefix) + index-based injection + progressive compaction (Session Memory → LLM AutoCompact) + adjustable compaction threshold (200K–1M presets / custom), hot-window rewriting removed for a stable cache prefix
 - **Checkpoint / Resume**: tasks auto-save snapshots, resume after crash or interruption
 - **Multi-Agent Collaboration**: 5 built-in roles (Recon/Attacker/Verifier/Intelligence/Reporter) sharing context, Coordinator orchestrates the workflow
 - **Progressive Skill Disclosure**: 99 built-in security skills, only the index injected into the system prompt

@@ -21,6 +21,7 @@ export interface AppSettings {
   llm_assisted_verify_enabled: boolean;
   sensitive_op_confirm: boolean;
   browser_headed: boolean;
+  compact_limit_tokens: number;
 }
 
 // LLM 服务商信息

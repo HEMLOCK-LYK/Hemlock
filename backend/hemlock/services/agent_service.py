@@ -68,7 +68,6 @@ from hemlock.core.pentest_context import (
     remove_context,
 )
 from hemlock.core.context_manager import (
-    ContextAssembler,
     TokenEstimator,
     ToolOutputDistiller,
 )
@@ -1216,10 +1215,14 @@ AGENT_TOOLS = [
         "function": {
             "name": "save_memory",
             "description": (
-                "将一条经验保存到长期记忆库，让未来的会话能从中受益。\n"
-                "适用于：踩坑教训、被纠正的方法论、使用者偏好、项目约束等值得跨会话复用的经验。\n"
-                "每条记忆必须包含 name（唯一标识）、description（一句话描述）、type（记忆类型）、trigger（关键词）。\n"
-                "feedback 和 project 类型必须包含 Why 和 How to apply。"
+                "将一条经验或知识保存到长期记忆库，让未来的会话能从中受益。\n"
+                "两类去向：\n"
+                "1. 经验（不传 kb）：踩坑教训、被纠正的方法论、使用者偏好、项目约束等。\n"
+                "2. 知识库条目（传 kb）：体系化的实战知识沉淀——如绕 WAF 技巧、nday 成功利用指南、"
+                "0day 记录等。知识库由使用者和 Agent 按需创建（kb 不存在时自动创建），"
+                "日积月累形成可复用的知识资产。\n"
+                "每条必须包含 name（唯一标识）、description（一句话描述）、type（记忆类型）、trigger（关键词）。\n"
+                "feedback/project 类型必须包含 Why 和 How to apply。"
             ),
             "parameters": {
                 "type": "object",
@@ -1235,7 +1238,11 @@ AGENT_TOOLS = [
                     "type": {
                         "type": "string",
                         "enum": ["user", "feedback", "project", "reference"],
-                        "description": "user=使用者偏好, feedback=踩坑纠正, project=项目约束, reference=外部资源",
+                        "description": "user=使用者偏好, feedback=踩坑纠正, project=项目约束, reference=外部资源。传 kb 时忽略此参数（自动为 kb 类型）",
+                    },
+                    "kb": {
+                        "type": "string",
+                        "description": "知识库名（可选）。传入时保存为该知识库的条目；库不存在时自动创建。不传则保存为经验",
                     },
                     "trigger": {
                         "type": "array",
@@ -1256,9 +1263,12 @@ AGENT_TOOLS = [
         "function": {
             "name": "get_memory",
             "description": (
-                "读取指定长期记忆的完整内容。记忆索引（名称+描述+触发词）已注入系统提示，"
-                "当某条记忆与当前任务相关、需要完整正文（如踩坑教训、项目约束、使用偏好）时调用此工具。"
-                "用于按需加载记忆正文，避免每次对话全量注入记忆导致 Token 消耗过大。"
+                "读取长期记忆/知识库条目的完整内容。记忆与知识库索引（名称+描述）已注入系统提示，"
+                "当某条记忆与当前任务相关、需要完整正文时调用此工具。\n"
+                "两种用法：\n"
+                "1. 传 memory_id：按名称读取单条完整内容。\n"
+                "2. 传 kb + query：在指定知识库内检索条目（匹配名称/描述/关键词/正文），"
+                "返回最相关的条目列表——索引未列出所需条目时用它发现（如 0day 库按组件名检索）。"
             ),
             "parameters": {
                 "type": "object",
@@ -1267,8 +1277,15 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "记忆名称（从记忆索引中获取，如 waf-encoding-bypass）",
                     },
+                    "kb": {
+                        "type": "string",
+                        "description": "知识库名（检索模式），如 '0day-库'",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "检索关键词（检索模式），如组件名 'shiro' 或手法 '双层编码'",
+                    },
                 },
-                "required": ["memory_id"],
             },
         },
     },
@@ -1825,7 +1842,7 @@ SYSTEM_PROMPT = """你是 Hemlock 的 AI 安全测试 Agent，辅助用户完成
 - **角色可选不强制**：spawn_subagent 可省略 role（通用执行单元），或按任务类型选最接近的专业角色；无论是否指定角色，子 Agent 都以 goal 任务目标为准执行，不会被角色定位限制。
 
 ## 记忆
-- save_memory 沉淀跨会话经验（4 类：user/feedback/project/reference；feedback/project 含 **Why** + **How to apply**，用 [[名称]] 关联）；get_memory 按需读完整正文。写前查重。
+- save_memory 沉淀跨会话知识：①不传 kb = 经验（4 类：user/feedback/project/reference；feedback/project 含 **Why** + **How to apply**，用 [[名称]] 关联）②传 kb = 知识库条目（体系化实战知识，如绕 WAF 技巧/nday 利用指南/0day 记录；库不存在自动创建）。get_memory 按需读完整正文（或 kb+query 库内检索）。写前查重。
 
 ## 输出与终止
 - 中间步骤一句话；最终回复结构化总结（发现+证据+建议）；测试完成回复 "TASK_COMPLETE"。
@@ -2254,10 +2271,10 @@ class AgentOrchestrator:
                 # 第一步（step_num=0）就检查：遗留超长对话恢复后立即推进压缩，
                 # 不依赖上下文注入节点（self.context 可能为 None）；之后每 interval 步
                 # 检查一次。有 compaction 时历史固化，messages 总 token ≈ 追加区 token，
-                # 超窗口 50% 才推进。
+                # 超窗口 80%（_COMPACT_THRESHOLD_RATIO）才推进。
                 if step_num % self._context_inject_interval == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    threshold = int(_get_context_window(self.db, self.provider_id) * 0.5)
+                    threshold = min(_get_compact_limit(), int(_get_context_window(self.db, self.provider_id) * _COMPACT_THRESHOLD_RATIO))
                     if current_tokens > threshold:
                         before_tokens = current_tokens
                         # 推进分界线：压缩追加区 → 固化 compaction → 追加区归零
@@ -5003,21 +5020,33 @@ class AgentOrchestrator:
     # ===== 记忆系统工具 =====
 
     def _tool_save_memory(self, args: dict) -> dict:
-        """将一条经验保存到长期记忆库。"""
+        """将一条经验或知识保存到长期记忆库（经验 或 知识库条目）。"""
         name = args.get("name", "").strip()
         description = args.get("description", "").strip()
         mem_type = args.get("type", "").strip()
         trigger_list = args.get("trigger", [])
         content = args.get("content", "").strip()
+        kb = (args.get("kb") or "").strip()
 
-        if not name or not description or not mem_type or not content:
-            return {"error": "name, description, type, content 均不能为空"}
-
-        if mem_type not in ("user", "feedback", "project", "reference"):
-            return {"error": f"type 必须是 user/feedback/project/reference，收到: {mem_type}"}
+        if not name or not description or not content:
+            return {"error": "name, description, content 均不能为空"}
+        if not kb and not mem_type:
+            return {"error": "type 不能为空（保存知识库条目时传 kb 可省略 type）"}
 
         try:
-            from hemlock.core.memory_manager import create_memory, get_memory_index, _memory_to_dict
+            from hemlock.core.memory_manager import (
+                create_memory, create_kb, get_memory_index, _memory_to_dict,
+            )
+
+            created_kb = None
+            if kb:
+                # 知识库条目：库不存在时自动创建（Agent/使用者都可按类型建库）
+                mem_type = "kb"
+                from hemlock.core.memory_manager import list_kbs, _safe_name
+                existing_kbs = {k["name"] for k in list_kbs(None)}
+                if _safe_name(kb) not in existing_kbs:
+                    create_kb(kb, description=f"{name} 等知识的沉淀库（由 Agent 自动创建）")
+                    created_kb = kb
 
             memory = create_memory(
                 db=None,  # 文件方案，不需要数据库
@@ -5027,16 +5056,20 @@ class AgentOrchestrator:
                 trigger_list=trigger_list,
                 content=content,
                 project_id=self.task.project_id if mem_type == "project" else None,
+                kb=kb or None,
             )
 
             # 返回当前记忆库索引概览
             index = get_memory_index(None)
             from hemlock.core.memory_manager import MEMORIES_DIR
+            note = f"记忆已保存到 {MEMORIES_DIR}，未来会话中会自动加载"
+            if created_kb:
+                note += f"（知识库 '{created_kb}' 为新建）"
             return {
                 "success": True,
                 "memory": _memory_to_dict(memory),
                 "total_memories": len(index),
-                "note": f"记忆已保存到 {MEMORIES_DIR}，未来会话中会自动加载",
+                "note": note,
             }
         except ValueError as e:
             return {"error": str(e)}
@@ -5045,18 +5078,43 @@ class AgentOrchestrator:
             return {"error": f"保存记忆失败: {type(e).__name__}: {e}"}
 
     def _tool_get_memory(self, args: dict) -> dict:
-        """读取指定长期记忆的完整内容（索引机制：正文按需加载）。"""
-        memory_id = args.get("memory_id", "").strip()
-        if not memory_id:
-            return {"error": "memory_id 不能为空，请从记忆索引中选择"}
+        """读取指定长期记忆/知识库条目的完整内容（索引机制：正文按需加载）。"""
+        memory_id = (args.get("memory_id") or "").strip()
+        kb = (args.get("kb") or "").strip()
+        query = (args.get("query") or "").strip()
 
         try:
-            from hemlock.core.memory_manager import get_memory, _memory_to_dict
+            from hemlock.core.memory_manager import get_memory, search_kb_entries, _memory_to_dict
+
+            # 检索模式：在指定知识库内按关键词发现条目
+            if kb:
+                if not query:
+                    return {"error": "kb + query 检索模式需要提供 query 关键词"}
+                results = search_kb_entries(None, kb=kb, query=query, n_results=20)
+                if not results:
+                    from hemlock.core.memory_manager import list_kbs
+                    kbs = [k["name"] for k in list_kbs(None)]
+                    return {
+                        "success": True,
+                        "results": [],
+                        "message": f"知识库 '{kb}' 中没有匹配 '{query}' 的条目",
+                        "available_kbs": kbs,
+                    }
+                return {
+                    "success": True,
+                    "results": results,
+                    "total": len(results),
+                    "message": f"在知识库 '{kb}' 中检索到 {len(results)} 条（已含完整内容），按相关性排序",
+                }
+
+            if not memory_id:
+                return {"error": "memory_id 不能为空，请从记忆索引中选择；或在知识库内检索（kb + query）"}
+
             mem = get_memory(None, memory_id)
             if not mem:
                 return {
                     "error": f"记忆不存在: {memory_id}",
-                    "hint": "请从系统提示中的「长期记忆索引」选择正确的记忆名称",
+                    "hint": "请从系统提示中的「长期记忆索引」或「知识库索引」选择正确的记忆名称",
                 }
             return {
                 "success": True,
@@ -5821,6 +5879,13 @@ class AgentOrchestrator:
 # 不同请求间字节不同，前缀缓存全炸。
 _MICRO_COMPACT_THRESHOLD = 10000
 
+# 压缩触发阈值的窗口安全上限（占上下文窗口的比例）：
+# 实际阈值 = min(用户设置的 compact_limit_tokens 绝对值, 窗口 × 0.8)。
+# 绝对值与窗口解耦（1M 窗口按比例会在 800K 才压缩，摘要失真严重），
+# 比例只负责兜底：TokenEstimator 有 ±15% 误差，0.8×1.15≈0.92 仍不会顶爆真实窗口。
+# 之前用 50% 会导致压缩频率翻倍——每多压一次就多一次前缀重建（缓存归零）+ 一次摘要失真。
+_COMPACT_THRESHOLD_RATIO = 0.8
+
 
 def _tool_result_to_llm_content(tool_name: str, tool_args: dict, tool_result: Any) -> str:
     """将工具结果序列化为传给 LLM 的消息内容，超大时蒸馏（微压缩）。
@@ -5969,6 +6034,47 @@ def _build_session_memory(pentest_context: Any, old_text: str = "") -> str:
     return "\n\n".join(parts)
 
 
+def _deterministic_boundary_compact(
+    messages: list[dict],
+    keep_recent: int = 10,
+) -> tuple[list[dict], str]:
+    """确定性边界压缩（LLM 不可用/失败时的回退，替代旧热窗口滑窗蒸馏）。
+
+    与 LLM 压缩同构：system + [上下文压缩] boundary + 最近 keep_recent 条原文。
+    旧段不做逐条改写/蒸馏——只用确定性提取（用户指令 + 战术要点行）生成摘要，
+    不产生「Agent 看到被改写过的工具输出」的误导风险。压缩一次性发生并
+    被调用方固化为 compaction 边界，之后前缀继续逐字节稳定。
+
+    Returns:
+        (新消息列表, 压缩方式)：'deterministic' / 'none'
+    """
+    system_msgs, old, recent = _split_for_autocompact(messages, keep_recent)
+    if not old:
+        return messages, "none"
+
+    old_text = _messages_to_compact_text(old)
+    if len(old_text) < 800:
+        return messages, "none"  # 太短不值得压缩
+
+    # 确定性提取：近期用户指令 + 战术要点（不调 LLM、不改写工具输出）
+    summary = _build_session_memory(None, old_text)
+    if not summary or len(summary) < 60:
+        summary = f"早期对话已归档（{len(old)} 条消息）。完整历史可在前端对话记录中查看；"
+
+    boundary = {
+        "role": "user",
+        "content": (
+            "[上下文压缩] 早期对话已按确定性规则归档为以下要点，请基于它继续决策。"
+            "需要细节时用 list_flows（翻页浏览流量）/ get_flow_detail（单条表单）/ "
+            "list_reported_findings / get_memory 等工具查完整数据。\n"
+            "=== 进展摘要 ===\n"
+            f"{summary}\n"
+            "=== 摘要结束 ==="
+        ),
+    }
+    return system_msgs + [boundary] + recent, "deterministic"
+
+
 async def _auto_compact_messages(
     messages: list[dict],
     db: Session | None = None,
@@ -5982,11 +6088,10 @@ async def _auto_compact_messages(
     压缩层按成本递进（Claude Code compact.ts 优先级链）：
     1. Session Memory（免费）：PentestContext 已预提取的结构化进展 → 直接用，不调 LLM
     2. LLM 摘要（贵）：Session Memory 不足时，用 LLM 生成完整进展摘要
-    3. 确定性压缩：LLM 失败/未配置时回退
+    3. 确定性边界压缩：LLM 失败/未配置时回退（不做逐条改写，见 _deterministic_boundary_compact）
 
     返回 (新消息列表, 压缩方式)：'session_memory' / 'llm' / 'deterministic' / 'none'。
     """
-    from hemlock.core.context_manager import ContextAssembler
     import re as _re
 
     system_msgs, old, recent = _split_for_autocompact(messages, keep_recent)
@@ -6013,18 +6118,30 @@ async def _auto_compact_messages(
         return system_msgs + [boundary] + recent, "session_memory"
 
     # ===== 第 2 层：LLM 摘要（贵）=====
-    # 未配置 LLM 或熔断触发：直接回退确定性压缩，避免白跑 API 调用
+    # 未配置 LLM 或熔断触发：直接回退确定性边界压缩，避免白跑 API 调用
     if not _has_llm(db) or _autocompact_failure_counts.get(key, 0) >= _AUTOCOMPACT_MAX_CONSECUTIVE_FAILURES:
-        asm = ContextAssembler()
-        return asm.compress_messages(messages), "deterministic"
+        return _deterministic_boundary_compact(messages, keep_recent)
 
     try:
+        # 超长历史的摘要输入采样：LLM 输入上限 150K 字符（约 4 万+ token，任何模型都装得下）。
+        # 头 50K（任务设定/授权/早期发现）+ 尾 100K（近期工作）。中段高频重复的工具调用
+        # 已被第 1 层 session_memory（PentestContext 结构化进展）与战术要点提取全文吸收，
+        # 不必进摘要输入——压缩阈值放开到 200K/400K tokens 后这里若仍只取开头会丢掉大半历史。
+        if len(old_text) > 150_000:
+            omitted = len(old_text) - 150_000
+            llm_input = (
+                old_text[:50_000]
+                + f"\n\n[...中段约 {omitted} 字符已省略：重复性工具调用，结构化进展已由会话记忆承载...]\n\n"
+                + old_text[-100_000:]
+            )
+        else:
+            llm_input = old_text
         result = await asyncio.to_thread(
             chat,
             [
                 # NO_TOOLS：摘要调用不带工具，且系统提示明确只用文本，防止摘要时误调工具
                 {"role": "system", "content": "你是会话压缩器。CRITICAL: 只用文本回复，不调用任何工具，不输出 markdown 代码块。"},
-                {"role": "user", "content": _AUTOCOMPACT_PROMPT + "\n\n=== 待压缩对话 ===\n" + old_text[:60000]},
+                {"role": "user", "content": _AUTOCOMPACT_PROMPT + "\n\n=== 待压缩对话 ===\n" + llm_input},
             ],
             temperature=0.2,
             provider_id=provider_id,
@@ -6054,10 +6171,9 @@ async def _auto_compact_messages(
         new_messages = system_msgs + [boundary] + recent
         return new_messages, "llm"
     except Exception as e:
-        logger.warning(f"LLM 自动压缩失败（{type(e).__name__}: {e}），回退确定性压缩")
+        logger.warning(f"LLM 自动压缩失败（{type(e).__name__}: {e}），回退确定性边界压缩")
         _autocompact_failure_counts[key] = _autocompact_failure_counts.get(key, 0) + 1
-        asm = ContextAssembler()
-        return asm.compress_messages(messages), "deterministic"
+        return _deterministic_boundary_compact(messages, keep_recent)
 
 
 async def _advance_compaction_boundary(
@@ -6075,7 +6191,7 @@ async def _advance_compaction_boundary(
     分界线语义：
     - 历史 compaction 已固化到 task.steps，恢复时线性展开、不重算
     - 追加区（最后一个 compaction 之后的对话）原文保留 → 前缀稳定命中缓存
-    - 仅当追加区超预算（threshold = context_window × 50%）才推进分界线：
+    - 仅当追加区超预算（threshold = context_window × 80%）才推进分界线：
       压缩追加区 → 固化为新 compaction 步骤 → 追加区归零重新积累
 
     压缩复用 _auto_compact_messages 三层（session_memory → LLM → deterministic），
@@ -6195,6 +6311,18 @@ def _has_llm(db: Session | None = None) -> bool:
         except Exception:
             pass
     return False
+
+
+def _get_compact_limit() -> int:
+    """获取用户配置的上下文压缩阈值（tokens，绝对值）。
+
+    与模型窗口解耦：1M 窗口的模型若按比例（0.8）会在 800K 才压缩，
+    早期对话太长会让摘要严重失真——由用户选择累积上限
+    （预设 200K/400K/600K/1M，默认 200K，推荐 400K）。
+    下限 16K 兜底：防止填 0/负数导致每轮都触发压缩。
+    """
+    limit = int(getattr(settings, "compact_limit_tokens", 200_000) or 0)
+    return max(limit, 16_384)
 
 
 def _get_context_window(db: Session | None = None, provider_id: str | None = None) -> int:
@@ -6802,7 +6930,7 @@ def _build_chat_messages(steps: list[dict], task: Task, db: Session | None = Non
     # 无 compaction 时（首次累积期）原样展开、不做任何压缩重算——
     # 旧版在这里按 4K 热窗口滑动蒸馏，每轮移动窗口边界都会改写历史前缀
     # （缓存命中率归零 + 过早丢失工具输出原文）。膨胀兜底统一由运行循环的
-    # 分界线检查负责：恢复后第一步就检查 token 量，超窗口 50% 才推进一次压缩。
+    # 分界线检查负责：恢复后第一步就检查 token 量，超窗口 80%（_COMPACT_THRESHOLD_RATIO）才推进一次压缩。
     messages.extend(_linear_restore_steps(steps))
 
     return messages
@@ -7114,7 +7242,7 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
 
     # 1.6 分界线兜底：恢复后先检查一次（遗留超长对话在第一步就被推进压缩，
     # 不依赖工具调用触发；正常体量时这里只做一次 token 估算即通过）
-    _threshold = int(_get_context_window(db, provider_id) * 0.5)
+    _threshold = min(_get_compact_limit(), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
     if TokenEstimator.estimate_messages(messages) > _threshold:
         messages, _ctype = await _advance_compaction_boundary(
             db, task, steps, messages, context, provider_id,
@@ -7460,10 +7588,10 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
 
         # ===== 分界线机制：追加区超预算才推进压缩分界线 =====
         # 有 compaction 步骤时历史段已固化（恢复线性展开、不重算，前缀稳定命中缓存）；
-        # messages 总 token ≈ 追加区 token（历史只剩小摘要），超窗口 50% 才推进。
+        # messages 总 token ≈ 追加区 token（历史只剩小摘要），超窗口 80%（_COMPACT_THRESHOLD_RATIO）才推进。
         if total_tool_calls > 0 and total_tool_calls % 10 == 0:
             context_window = _get_context_window(db, provider_id)
-            threshold = int(context_window * 0.5)
+            threshold = min(_get_compact_limit(), int(context_window * _COMPACT_THRESHOLD_RATIO))
             current_tokens = TokenEstimator.estimate_messages(messages)
             if current_tokens > threshold:
                 before_tokens = current_tokens
@@ -7891,14 +8019,14 @@ async def run_subagent(
                     })
 
                 # ===== 上下文管理：子 Agent 动态压缩 =====
-                # 每 5 步检查，超 context_window×50% 才压缩一次（对齐主循环分界线语义）。
+                # 每 5 步检查，超 context_window×80% 才压缩一次（对齐主循环分界线语义）。
                 # 复用 AutoCompact 三层（session_memory → LLM → deterministic），
                 # 保留最近 10 条原文——刚拿到的证据不进摘要；压缩后消息纯追加，
                 # 前缀稳定命中缓存。子 Agent 无独立 steps，不走固化分界线，
                 # 直接在内存消息上推进。
                 if step_num > 0 and step_num % 5 == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    threshold = int(_get_context_window(db, provider_id) * 0.5)
+                    threshold = min(_get_compact_limit(), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
                     if current_tokens > threshold:
                         before_tokens = current_tokens
                         messages, ctype = await _auto_compact_messages(
@@ -8285,11 +8413,11 @@ async def run_coordinator_task(
                 })
 
             # ===== 上下文管理：指挥官动态压缩 =====
-            # 每 5 步检查，超 context_window×50% 才压缩一次（与主循环/子 Agent 同一语义），
+            # 每 5 步检查，超 context_window×80% 才压缩一次（与主循环/子 Agent 同一语义），
             # 复用 AutoCompact 三层并保留最近 10 条原文，压缩后纯追加保前缀缓存
             if step_num > 0 and step_num % 5 == 0:
                 current_tokens = TokenEstimator.estimate_messages(messages)
-                threshold = int(_get_context_window(db, None) * 0.5)
+                threshold = min(_get_compact_limit(), int(_get_context_window(db, None) * _COMPACT_THRESHOLD_RATIO))
                 if current_tokens > threshold:
                     before_tokens = current_tokens
                     messages, ctype = await _auto_compact_messages(

@@ -1,4 +1,9 @@
 :root {
+  /* WebView2/Chromium 的初始光标与原生控件配色跟随 color-scheme：
+     应用默认浅色主题，不声明时系统深色模式会让首次聚焦的光标渲染成
+     白色，落在白色编辑区里不可见（多点几下 Blink 接管后才恢复深色） */
+  color-scheme: light;
+
   /* ===== 主题相关变量由 ThemeContext 动态设置（见 src/themes.ts）===== */
   /* --bg-primary ~ --risk-info 等变量不再在此硬编码，由 JS 运行时注入 */
 
@@ -67,6 +72,18 @@ button {
 input, textarea, select {
   font-family: inherit;
   font-size: inherit;
+}
+
+/* 可编辑元素光标颜色显式跟随主题文本色（浅色主题下即黑色）。
+   不声明时 WebView2 首次聚焦会按系统配色渲染白色光标，
+   在白色可编辑区域里肉眼不可见 */
+input, textarea, select, [contenteditable="true"] {
+  caret-color: var(--text-primary);
+}
+
+/* 深色主题声明 dark scheme，让原生控件/初始光标跟随深色 */
+html[data-theme]:not([data-theme="light"]) {
+  color-scheme: dark;
 }
 
 textarea {

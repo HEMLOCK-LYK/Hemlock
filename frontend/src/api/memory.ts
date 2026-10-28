@@ -2,7 +2,7 @@ import client from "./client";
 
 // ===== 类型定义 =====
 
-export type MemoryType = "user" | "feedback" | "project" | "reference";
+export type MemoryType = "user" | "feedback" | "project" | "reference" | "kb";
 
 export interface Memory {
   id: string;
@@ -12,10 +12,18 @@ export interface Memory {
   trigger: string[];
   content: string;
   project_id: string | null;
+  kb: string | null;
   created_at: string;
   updated_at: string;
   matched_triggers?: string[];
   match_count?: number;
+}
+
+export interface KnowledgeBase {
+  name: string;
+  description: string;
+  entry_count: number;
+  updated_at: string;
 }
 
 export interface MemoryIndexItem {
@@ -33,6 +41,7 @@ export interface MemoryCreateRequest {
   trigger?: string[];
   content?: string;
   project_id?: string | null;
+  kb?: string | null;
 }
 
 export interface MemoryUpdateRequest {
@@ -42,6 +51,7 @@ export interface MemoryUpdateRequest {
   trigger?: string[];
   content?: string;
   project_id?: string | null;
+  kb?: string | null;
 }
 
 // ===== API =====
@@ -49,11 +59,13 @@ export interface MemoryUpdateRequest {
 export const memoryApi = {
   list: async (
     type?: MemoryType,
-    projectId?: string
+    projectId?: string,
+    kb?: string
   ): Promise<{ memories: Memory[]; total: number }> => {
     const params: Record<string, string> = {};
     if (type) params.type = type;
     if (projectId) params.project_id = projectId;
+    if (kb) params.kb = kb;
     const { data } = await client.get<{ memories: Memory[]; total: number }>(
       "/memories",
       { params }
@@ -106,6 +118,33 @@ export const memoryApi = {
   delete: async (memoryId: string): Promise<{ message: string }> => {
     const { data } = await client.delete<{ message: string }>(
       `/memories/${memoryId}`
+    );
+    return data;
+  },
+
+  // ===== 知识库 =====
+
+  listKbs: async (): Promise<{ kbs: KnowledgeBase[]; total: number }> => {
+    const { data } = await client.get<{ kbs: KnowledgeBase[]; total: number }>(
+      "/memories/kb"
+    );
+    return data;
+  },
+
+  createKb: async (
+    name: string,
+    description: string
+  ): Promise<KnowledgeBase & { message: string }> => {
+    const { data } = await client.post<KnowledgeBase & { message: string }>(
+      "/memories/kb",
+      { name, description }
+    );
+    return data;
+  },
+
+  deleteKb: async (name: string): Promise<{ message: string }> => {
+    const { data } = await client.delete<{ message: string }>(
+      `/memories/kb/${encodeURIComponent(name)}`
     );
     return data;
   },

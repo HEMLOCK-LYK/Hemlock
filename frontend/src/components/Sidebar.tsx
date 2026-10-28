@@ -48,7 +48,7 @@ const navSections = [
       { to: "/recon", label: "AI 资产收集", icon: Radar },
       { to: "/agent/config", label: "Agent 扩展", icon: Zap },
       { to: "/agent/roles", label: "Agent 角色", icon: Users },
-      { to: "/memory", label: "记忆管理", icon: Brain },
+      { to: "/memory", label: "记忆库", icon: Brain },
     ],
   },
   {
@@ -165,7 +165,7 @@ export function Sidebar() {
       <div className="sidebar-footer">
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <Shield size={12} />
-          v0.8.0
+          v0.9.0
         </div>
       </div>
 

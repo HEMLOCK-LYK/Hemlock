@@ -22,6 +22,21 @@ def _headers_to_str(headers) -> str:
     return "\n".join(f"{k}: {v}" for k, v in headers.items())
 
 
+def _req_headers_to_str(flow: http.HTTPFlow) -> str:
+    """请求头转字符串，并保证 Host 头存在且位于头部区首位。
+
+    HTTP/2 流量没有 Host 头（目标在 :authority 伪头部里，不进 headers），
+    直接序列化会得到「没有 Host 的请求」；这里从 host_header/authority
+    推导补齐，放在请求行之后的第一行（与浏览器 HTTP/1.1 的头顺序一致）。
+    """
+    headers_str = _headers_to_str(flow.request.headers)
+    if not any(k.lower() == "host" for k in flow.request.headers.keys()):
+        host_header = flow.request.host_header or flow.request.authority or flow.request.host
+        if host_header:
+            headers_str = f"Host: {host_header}" + ("\n" + headers_str if headers_str else "")
+    return headers_str
+
+
 class CaptureAddon:
     """mitmproxy addon：拦截响应，把请求响应写入 SQLite。
 
@@ -41,8 +56,8 @@ class CaptureAddon:
                 project_id = get_active_project()
                 print(f"[CaptureAddon] project_id={project_id}", file=sys.stderr, flush=True)
 
-                # 完整保留所有请求头部（mitmproxy 的 headers 包含 Host 等）
-                req_headers_str = _headers_to_str(flow.request.headers)
+                # 完整保留所有请求头部（HTTP/2 流量自动补 Host 到首位）
+                req_headers_str = _req_headers_to_str(flow)
                 resp_headers_str = ""
                 if flow.response:
                     resp_headers_str = _headers_to_str(flow.response.headers)

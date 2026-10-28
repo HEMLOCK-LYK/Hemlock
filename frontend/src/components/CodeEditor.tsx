@@ -381,8 +381,9 @@ export function CodeEditor({
     setCurrentMatchIdx((prev) => (prev + 1) % matches.length);
   };
 
-  // 空内容
-  if (!value || !value.trim()) {
+  // 空内容（只读模式直接渲染空容器；可编辑模式不能提前返回，
+  // 否则空标签页没有 textarea，新建标签页将无法输入——见重放器）
+  if (!editable && (!value || !value.trim())) {
     return (
       <div
         ref={containerRef}

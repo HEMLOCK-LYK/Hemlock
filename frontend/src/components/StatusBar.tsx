@@ -52,7 +52,7 @@ export function StatusBar() {
       </div>
       <div style={{ flex: 1 }} />
       <div className="status-bar-item">
-        Hemlock v0.8.0
+        Hemlock v0.9.0
       </div>
     </div>
   );

@@ -77,9 +77,9 @@ export function parseRawRequest(
 /**
  * 从 {method, url, headers, body} 构建原始请求文本。
  *
- * 如果 headers 中没有 Host，自动从 URL 提取并追加到末尾——
- * 与后端入库顺序（用户头按原序 + 自动头追加尾部）一致，
- * 保证重放器 Raw 与流量列表详情的头顺序「像复制粘贴一样」。
+ * 如果 headers 中没有 Host，从 URL 提取并插入到头部区首位——
+ * 与浏览器 HTTP/1.1 的头顺序一致（Host 紧跟请求行），
+ * 也与流量列表详情（buildRequestContent）和代理入库顺序保持一致。
  */
 export function buildRawRequest(
   method: string,
@@ -95,12 +95,12 @@ export function buildRawRequest(
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
 
-    // 检查是否已有 Host（缺失时追加到末尾，不插到最前）
+    // 检查是否已有 Host（缺失时插到首位，不追加到末尾）
     const hasHost = headerLines.some((l) =>
       l.toLowerCase().startsWith("host:")
     );
     if (!hasHost) {
-      headerLines.push(`Host: ${u.host}`);
+      headerLines.unshift(`Host: ${u.host}`);
     }
 
     const headerStr = headerLines.join("\n");

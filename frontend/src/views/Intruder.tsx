@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { Play, Plus, Trash2, Bot, Repeat2, Repeat, Swords, X, Eye, Crosshair, Eraser, Inbox, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
+import { Play, Plus, Trash2, Bot, Repeat2, Repeat, Swords, X, Eye, Crosshair, Eraser, Inbox, ArrowUp, ArrowDown, ArrowUpDown, Upload } from "lucide-react";
 import { runIntruder } from "../api/intruder";
 import { getFlow } from "../api/flows";
 import { useProject } from "../context/ProjectContext";
@@ -1149,6 +1149,41 @@ export function Intruder() {
     setPreviewPayloads(payloads);
   };
 
+  // ===== 导入外部字典文件（txt，每行一条） =====
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImportWordlist = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // 清空 value，允许连续导入同一个文件
+    e.target.value = "";
+    if (!file || !effectivePos) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      // 按行拆分、去空行、去重（保留首次出现顺序）
+      const seen = new Set<string>();
+      const lines: string[] = [];
+      for (const raw of text.split(/\r\n|\r|\n/)) {
+        const line = raw.trim();
+        if (!line || seen.has(line)) continue;
+        seen.add(line);
+        lines.push(line);
+      }
+      if (lines.length === 0) return;
+      // 导入的内容是字面列表 → 切到 simple 类型并填充
+      const newPositions = [...activeTab.positions];
+      newPositions[effectiveIdx] = ensureDefaults({
+        ...newPositions[effectiveIdx],
+        payloadType: "simple",
+        payloads: lines,
+      });
+      const newRaw = [...activeTab.rawPayloads];
+      newRaw[effectiveIdx] = lines.join("\n");
+      updateActiveTab({ positions: newPositions, rawPayloads: newRaw });
+    };
+    reader.readAsText(file);
+  };
+
   // ===== 运行爆破 =====
   const handleRun = async () => {
     const parsed = parseRawRequest(activeTab.rawRequest, activeTab.scheme);
@@ -1159,8 +1194,15 @@ export function Intruder() {
       return;
     }
 
+    if (activeTab.positions.length === 0) {
+      updateActiveTab({
+        error: "请先标记 payload 位置：在请求中选中文本后点击「添加 §」",
+      });
+      return;
+    }
+
     // 根据每个位置的配置生成实际 payload
-    const positionsWithPayloads: IntruderPosition[] = activeTab.positions.map(
+    const generated = activeTab.positions.map(
       (p) => ({
         placeholder: p.placeholder,
         payloads: generatePayloadsForPosition(p),
@@ -1168,12 +1210,33 @@ export function Intruder() {
       })
     );
 
-    const empty = positionsWithPayloads.find((p) => p.payloads.length === 0);
-    if (empty) {
-      updateActiveTab({
-        error: `payload §${empty.placeholder}§ 没有生成任何内容，请检查配置`,
-      });
-      return;
+    let positionsWithPayloads: IntruderPosition[];
+    if (isSinglePayloadMode) {
+      // 单 payload 集模式（逐个测试/同步替换）：所有标记位共用第一个位置的
+      // payload 集——后端 sniper 用它依次替换每个标记位，battering_ram 同步替换。
+      // 此前未配置的位置 payload 为空会被拦截报错，且 UI 又只展示第一个位置的
+      // 配置，导致多标记位时爆破根本无法运行。
+      const shared = generated[0].payloads;
+      if (shared.length === 0) {
+        updateActiveTab({
+          error: `payload §${generated[0].placeholder}§ 没有生成任何内容，请检查配置`,
+        });
+        return;
+      }
+      positionsWithPayloads = activeTab.positions.map((p) => ({
+        placeholder: p.placeholder,
+        payloads: shared,
+        payloadType: "simple" as PayloadType,
+      }));
+    } else {
+      const empty = generated.find((p) => p.payloads.length === 0);
+      if (empty) {
+        updateActiveTab({
+          error: `payload §${empty.placeholder}§ 没有生成任何内容，请检查该标记位的配置`,
+        });
+        return;
+      }
+      positionsWithPayloads = generated;
     }
 
     setRunning(true);
@@ -1913,8 +1976,7 @@ export function Intruder() {
             </span>
           </div>
 
-          {/* Payload 标签（多 payload 模式才显示） */}
-          {!isSinglePayloadMode && (
+          {/* Payload 标签（始终显示：多 payload 模式下可切换配置，单 payload 模式下作位置指示） */}
           <div
             style={{
               display: "flex",
@@ -1925,29 +1987,33 @@ export function Intruder() {
             }}
           >
             {activeTab.positions.map((p, idx) => {
+              const active = !isSinglePayloadMode && selectedIdx === idx;
               return (
                 <div
                   key={idx}
+                  title={
+                    isSinglePayloadMode
+                      ? "当前攻击类型所有标记位共用同一个 payload 集（下方配置）"
+                      : `配置 §${p.placeholder}§ 的 payload`
+                  }
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: 4,
                     padding: "3px 8px",
                     borderRadius: 4,
-                    cursor: "pointer",
-                    background:
-                      selectedIdx === idx
-                        ? "var(--bg-active)"
-                        : "var(--bg-tertiary)",
-                    border:
-                      selectedIdx === idx
-                        ? "1px solid var(--accent-blue)"
-                        : "1px solid var(--border-default)",
+                    cursor: isSinglePayloadMode ? "default" : "pointer",
+                    background: active ? "var(--bg-active)" : "var(--bg-tertiary)",
+                    border: active
+                      ? "1px solid var(--accent-blue)"
+                      : "1px solid var(--border-default)",
                     fontSize: 11,
                     fontFamily: "var(--font-mono)",
                   }}
-                  onClick={() =>
-                    updateActiveTab({ selectedPositionIdx: idx })
+                  onClick={
+                    isSinglePayloadMode
+                      ? undefined
+                      : () => updateActiveTab({ selectedPositionIdx: idx })
                   }
                 >
                   {p.placeholder}
@@ -1966,13 +2032,21 @@ export function Intruder() {
                         e.stopPropagation();
                         handleRemovePosition(idx);
                       }}
-                    >
+                    title="移除该标记（保留原文，去掉 §）"
+                  >
                       <Trash2 size={10} />
                     </button>
                 </div>
               );
             })}
           </div>
+          {isSinglePayloadMode && activeTab.positions.length > 1 && (
+            <div
+              className="text-xs text-muted"
+              style={{ padding: "0 12px 8px", fontSize: 10, lineHeight: 1.5 }}
+            >
+              「{ATTACK_TYPES.find((a) => a.value === activeTab.attackType)?.label}」模式下所有标记位共用下方同一个 payload 集；如需为每个标记位单独配置 payload，请切换攻击类型为「并行配对」或「全组合」
+            </div>
           )}
 
           {/* Selected position config */}
@@ -2033,6 +2107,20 @@ export function Intruder() {
                 ))}
               </select>
               <div style={{ flex: 1 }} />
+              <button
+                className="btn btn-sm"
+                onClick={() => fileInputRef.current?.click()}
+                title="导入外部字典文件（txt，每行一条，自动去空行去重）"
+              >
+                <Upload size={10} /> 导入字典
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.dic,.list,.csv,text/plain"
+                style={{ display: "none" }}
+                onChange={handleImportWordlist}
+              />
               <button
                 className="btn btn-sm"
                 onClick={() => openPreview(effectiveIdx)}
