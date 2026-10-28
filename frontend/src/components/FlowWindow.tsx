@@ -195,7 +195,7 @@ export function FlowWindow({
           padding: "6px 12px",
           background: "var(--bg-secondary)",
           borderBottom: "1px solid var(--border-default)",
-          cursor: maximized ? "default" : "move",
+          cursor: maximized ? "inherit" : "move",
           userSelect: "none",
         }}
       >

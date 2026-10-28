@@ -2002,7 +2002,7 @@ export function Intruder() {
                     gap: 4,
                     padding: "3px 8px",
                     borderRadius: 4,
-                    cursor: isSinglePayloadMode ? "default" : "pointer",
+                    cursor: isSinglePayloadMode ? "inherit" : "pointer",
                     background: active ? "var(--bg-active)" : "var(--bg-tertiary)",
                     border: active
                       ? "1px solid var(--accent-blue)"
@@ -2362,7 +2362,7 @@ export function Intruder() {
                           key={i}
                           className="intruder-result-row"
                           style={{
-                            cursor: r.flow_id ? "pointer" : "default",
+                            cursor: r.flow_id ? "pointer" : "inherit",
                             gridTemplateColumns: RESULT_COLUMNS.map((c) => `${resultColWidths[c.id] ?? c.width}px`).join(" "),
                             minWidth: resultTotalWidth + 8 * (RESULT_COLUMNS.length - 1) + 24,
                             background: isActive ? "var(--bg-active)" : undefined,

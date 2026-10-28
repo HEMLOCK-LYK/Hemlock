@@ -74,6 +74,23 @@ input, textarea, select {
   font-size: inherit;
 }
 
+/* ===== 自绘高对比鼠标指针 =====
+   部分用户的系统指针是纯白配色：工字形（文本选择）指针落在白色可编辑区完全不可见。
+   这里用双色自绘光标替代系统指针——箭头=白芯黑边、工字形=黑芯白边，浅色深色背景都可见。
+   不修改任何界面配色；有显式 cursor 规则的元素（按钮 pointer、拖拽 move 等）不受影响。 */
+body {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M2 1 L2 15.5 L5.8 12.2 L8.2 17.8 L10.9 16.6 L8.5 11.2 L13.5 11.2 Z' fill='%23ffffff' stroke='%23000000' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E") 2 1, default;
+}
+
+input, textarea, [contenteditable="true"] {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%23ffffff' stroke-width='3.4' stroke-linecap='round'/%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%231a1a1a' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
+}
+
+/* 文本阅读/选择区（数据包详情、AI 回复等）：工字形指针 */
+.text-selectable {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%23ffffff' stroke-width='3.4' stroke-linecap='round'/%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%231a1a1a' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
+}
+
 /* 可编辑元素光标颜色显式跟随主题文本色（浅色主题下即黑色）。
    不声明时 WebView2 首次聚焦会按系统配色渲染白色光标，
    在白色可编辑区域里肉眼不可见 */

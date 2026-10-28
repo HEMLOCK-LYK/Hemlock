@@ -461,7 +461,7 @@ export function CodeEditor({
           padding: "2px",
           border: "none",
           background: "transparent",
-          cursor: matches.length ? "pointer" : "default",
+          cursor: matches.length ? "pointer" : "inherit",
           color: matches.length ? "var(--text-secondary)" : "var(--text-muted)",
           opacity: matches.length ? 1 : 0.4,
         }}
@@ -476,7 +476,7 @@ export function CodeEditor({
           padding: "2px",
           border: "none",
           background: "transparent",
-          cursor: matches.length ? "pointer" : "default",
+          cursor: matches.length ? "pointer" : "inherit",
           color: matches.length ? "var(--text-secondary)" : "var(--text-muted)",
           opacity: matches.length ? 1 : 0.4,
         }}
@@ -626,6 +626,7 @@ export function CodeEditor({
   return (
     <div
       ref={containerRef}
+      className="text-selectable"
       style={{
         display: "flex",
         flex: 1,

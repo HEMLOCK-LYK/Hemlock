@@ -55,7 +55,7 @@ interface MarkdownViewProps {
 /** 统一 markdown 渲染组件：GFM 表格、代码高亮 + 复制、ASCII 框线等宽。 */
 const MarkdownView = memo(function MarkdownView({ content, className = "agent-chat-msg-markdown" }: MarkdownViewProps) {
   return (
-    <div className={className}>
+    <div className={`text-selectable ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

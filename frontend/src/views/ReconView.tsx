@@ -1492,7 +1492,7 @@ function CompactToolRow({ tc, isRunning, onFlowClick }: CompactToolRowProps) {
           alignItems: "center",
           gap: 6,
           padding: "5px 10px",
-          cursor: hasDetail ? "pointer" : "default",
+          cursor: hasDetail ? "pointer" : "inherit",
         }}
       >
         {isRunning ? (
