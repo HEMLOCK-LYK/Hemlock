@@ -104,6 +104,11 @@ def _migrate_add_columns() -> None:
             conn.execute(text("ALTER TABLE llm_providers ADD COLUMN protocol VARCHAR(20) DEFAULT 'openai' NOT NULL"))
             conn.commit()
 
+        # 检查 llm_providers 表是否有 compact_limit 列（该模型的压缩阈值，tokens；空=走全局设置兜底）
+        if "compact_limit" not in provider_columns:
+            conn.execute(text("ALTER TABLE llm_providers ADD COLUMN compact_limit INTEGER"))
+            conn.commit()
+
 
 def get_db():
     """FastAPI 依赖：提供数据库会话。"""

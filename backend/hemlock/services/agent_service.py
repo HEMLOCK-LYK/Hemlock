@@ -1217,12 +1217,12 @@ AGENT_TOOLS = [
             "description": (
                 "将一条经验或知识保存到长期记忆库，让未来的会话能从中受益。\n"
                 "两类去向：\n"
-                "1. 经验（不传 kb）：踩坑教训、被纠正的方法论、使用者偏好、项目约束等。\n"
+                "1. 经验（不传 kb）：踩坑教训、被纠正的方法论、使用者偏好等。\n"
                 "2. 知识库条目（传 kb）：体系化的实战知识沉淀——如绕 WAF 技巧、nday 成功利用指南、"
                 "0day 记录等。知识库由使用者和 Agent 按需创建（kb 不存在时自动创建），"
                 "日积月累形成可复用的知识资产。\n"
-                "每条必须包含 name（唯一标识）、description（一句话描述）、type（记忆类型）、trigger（关键词）。\n"
-                "feedback/project 类型必须包含 Why 和 How to apply。"
+                "每条必须包含 name（唯一标识）、description（一句话描述）、type（归属）、trigger（关键词）。\n"
+                "经验类正文必须包含 Why 和 How to apply。"
             ),
             "parameters": {
                 "type": "object",
@@ -1238,11 +1238,11 @@ AGENT_TOOLS = [
                     "type": {
                         "type": "string",
                         "enum": ["user", "feedback", "project", "reference"],
-                        "description": "user=使用者偏好, feedback=踩坑纠正, project=项目约束, reference=外部资源。传 kb 时忽略此参数（自动为 kb 类型）",
+                        "description": "经验的内部子类（展示层统一显示为「经验」，无需纠结选哪个）：踩坑/纠正/偏好/资源一律传 feedback；仅对本项目生效的约束传 project（只在本项目会话中注入）。传 kb 时忽略此参数（自动为 kb 类型）",
                     },
                     "kb": {
                         "type": "string",
-                        "description": "知识库名（可选）。传入时保存为该知识库的条目；库不存在时自动创建。不传则保存为经验",
+                        "description": "知识库名（可选）。传入时保存为该知识库的条目；库不存在时自动创建。默认知识库：绕WAF实战技巧 / nday利用指南 / 0day库。不传则保存为经验",
                     },
                     "trigger": {
                         "type": "array",
@@ -1251,7 +1251,7 @@ AGENT_TOOLS = [
                     },
                     "content": {
                         "type": "string",
-                        "description": "记忆正文。feedback/project 类型必须包含 **Why:** 和 **How to apply:** 部分",
+                        "description": "记忆正文。经验类必须包含 **Why:** 和 **How to apply:** 部分",
                     },
                 },
                 "required": ["name", "description", "type", "trigger", "content"],
@@ -1279,7 +1279,7 @@ AGENT_TOOLS = [
                     },
                     "kb": {
                         "type": "string",
-                        "description": "知识库名（检索模式），如 '0day-库'",
+                        "description": "知识库名（检索模式），如 '0day库'",
                     },
                     "query": {
                         "type": "string",
@@ -1842,7 +1842,7 @@ SYSTEM_PROMPT = """你是 Hemlock 的 AI 安全测试 Agent，辅助用户完成
 - **角色可选不强制**：spawn_subagent 可省略 role（通用执行单元），或按任务类型选最接近的专业角色；无论是否指定角色，子 Agent 都以 goal 任务目标为准执行，不会被角色定位限制。
 
 ## 记忆
-- save_memory 沉淀跨会话知识：①不传 kb = 经验（4 类：user/feedback/project/reference；feedback/project 含 **Why** + **How to apply**，用 [[名称]] 关联）②传 kb = 知识库条目（体系化实战知识，如绕 WAF 技巧/nday 利用指南/0day 记录；库不存在自动创建）。get_memory 按需读完整正文（或 kb+query 库内检索）。写前查重。
+- save_memory 沉淀跨会话知识：①不传 kb = 经验（type 一般传 feedback，仅本项目生效的约束传 project；正文含 **Why** + **How to apply**，用 [[名称]] 关联）②传 kb = 知识库条目（体系化实战知识，沉淀到「绕WAF实战技巧 / nday利用指南 / 0day库」等库；库不存在自动创建）。get_memory 按需读完整正文（或 kb+query 库内检索）。写前查重。
 
 ## 输出与终止
 - 中间步骤一句话；最终回复结构化总结（发现+证据+建议）；测试完成回复 "TASK_COMPLETE"。
@@ -2274,7 +2274,7 @@ class AgentOrchestrator:
                 # 超窗口 80%（_COMPACT_THRESHOLD_RATIO）才推进。
                 if step_num % self._context_inject_interval == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    threshold = min(_get_compact_limit(), int(_get_context_window(self.db, self.provider_id) * _COMPACT_THRESHOLD_RATIO))
+                    threshold = min(_get_compact_limit(self.db, self.provider_id), int(_get_context_window(self.db, self.provider_id) * _COMPACT_THRESHOLD_RATIO))
                     if current_tokens > threshold:
                         before_tokens = current_tokens
                         # 推进分界线：压缩追加区 → 固化 compaction → 追加区归零
@@ -6313,15 +6313,32 @@ def _has_llm(db: Session | None = None) -> bool:
     return False
 
 
-def _get_compact_limit() -> int:
-    """获取用户配置的上下文压缩阈值（tokens，绝对值）。
+def _get_compact_limit(db: Session | None = None, provider_id: str | None = None) -> int:
+    """获取当前 Provider 的上下文压缩阈值（tokens，绝对值）。
 
-    与模型窗口解耦：1M 窗口的模型若按比例（0.8）会在 800K 才压缩，
-    早期对话太长会让摘要严重失真——由用户选择累积上限
-    （预设 200K/400K/600K/1M，默认 200K，推荐 400K）。
+    阈值归属到每个模型（API Key 管理页按模型设置）：不同 key 支持的窗口不同，
+    全局统一阈值会在多 Provider 时失真。解析顺序与 _get_context_window 一致：
+    指定 provider → 默认 provider → 任意 provider；provider 自身未设置时
+    回退全局 settings.compact_limit_tokens（老版本在设置页配的值继续生效）。
     下限 16K 兜底：防止填 0/负数导致每轮都触发压缩。
     """
-    limit = int(getattr(settings, "compact_limit_tokens", 200_000) or 0)
+    limit = 0
+    try:
+        if db:
+            q = db.query(LLMProvider)
+            provider = None
+            if provider_id:
+                provider = q.filter(LLMProvider.id == provider_id).first()
+            if provider is None:
+                provider = q.filter(LLMProvider.is_default == True).first()  # noqa: E712
+            if provider is None:
+                provider = q.first()
+            if provider is not None:
+                limit = int(getattr(provider, "compact_limit", None) or 0)
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        limit = int(getattr(settings, "compact_limit_tokens", 200_000) or 0)
     return max(limit, 16_384)
 
 
@@ -7242,7 +7259,7 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
 
     # 1.6 分界线兜底：恢复后先检查一次（遗留超长对话在第一步就被推进压缩，
     # 不依赖工具调用触发；正常体量时这里只做一次 token 估算即通过）
-    _threshold = min(_get_compact_limit(), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
+    _threshold = min(_get_compact_limit(db, provider_id), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
     if TokenEstimator.estimate_messages(messages) > _threshold:
         messages, _ctype = await _advance_compaction_boundary(
             db, task, steps, messages, context, provider_id,
@@ -7591,7 +7608,7 @@ async def chat_with_agent(task_id: str, user_message: str, db: Session, system_p
         # messages 总 token ≈ 追加区 token（历史只剩小摘要），超窗口 80%（_COMPACT_THRESHOLD_RATIO）才推进。
         if total_tool_calls > 0 and total_tool_calls % 10 == 0:
             context_window = _get_context_window(db, provider_id)
-            threshold = min(_get_compact_limit(), int(context_window * _COMPACT_THRESHOLD_RATIO))
+            threshold = min(_get_compact_limit(db, provider_id), int(context_window * _COMPACT_THRESHOLD_RATIO))
             current_tokens = TokenEstimator.estimate_messages(messages)
             if current_tokens > threshold:
                 before_tokens = current_tokens
@@ -8026,7 +8043,7 @@ async def run_subagent(
                 # 直接在内存消息上推进。
                 if step_num > 0 and step_num % 5 == 0:
                     current_tokens = TokenEstimator.estimate_messages(messages)
-                    threshold = min(_get_compact_limit(), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
+                    threshold = min(_get_compact_limit(db, provider_id), int(_get_context_window(db, provider_id) * _COMPACT_THRESHOLD_RATIO))
                     if current_tokens > threshold:
                         before_tokens = current_tokens
                         messages, ctype = await _auto_compact_messages(
@@ -8417,7 +8434,7 @@ async def run_coordinator_task(
             # 复用 AutoCompact 三层并保留最近 10 条原文，压缩后纯追加保前缀缓存
             if step_num > 0 and step_num % 5 == 0:
                 current_tokens = TokenEstimator.estimate_messages(messages)
-                threshold = min(_get_compact_limit(), int(_get_context_window(db, None) * _COMPACT_THRESHOLD_RATIO))
+                threshold = min(_get_compact_limit(db, None), int(_get_context_window(db, None) * _COMPACT_THRESHOLD_RATIO))
                 if current_tokens > threshold:
                     before_tokens = current_tokens
                     messages, ctype = await _auto_compact_messages(

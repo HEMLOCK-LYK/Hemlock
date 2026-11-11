@@ -22,8 +22,8 @@ import { Search, X, ChevronUp, ChevronDown } from "lucide-react";
 
 // ===== 共享样式常量 =====
 const FONT_FAMILY = "var(--font-mono)";
-const FONT_SIZE = 12;
-const LINE_HEIGHT = 1.6;
+const FONT_SIZE = 11.5;
+const LINE_HEIGHT = 1.5;
 const PADDING_TOP = 8;
 const PADDING_BOTTOM = 8;
 const PADDING_H = 12;
@@ -45,6 +45,8 @@ interface CodeEditorProps {
   type: "request" | "response";
   editable?: boolean;
   style?: React.CSSProperties;
+  /** 底部常驻搜索条（数据包详情用）：始终显示，输入即高亮；false 时保持原 Ctrl+F 浮层 */
+  persistentSearch?: boolean;
   /** 外部传入的 textarea ref（可编辑模式下），用于 Intruder 等需要访问选区的场景 */
   externalTextareaRef?: React.RefObject<HTMLTextAreaElement | null>;
   /** 选区变化回调（可编辑模式下），通知父组件是否有选中文本 */
@@ -64,6 +66,7 @@ export function CodeEditor({
   type,
   editable = false,
   style,
+  persistentSearch = false,
   externalTextareaRef,
   onSelectionChange,
 }: CodeEditorProps) {
@@ -118,7 +121,7 @@ export function CodeEditor({
     }
   }, [matches.length, currentMatchIdx]);
 
-  // Ctrl+F 快捷键
+  // Ctrl+F 快捷键（persistentSearch 模式下聚焦底部常驻搜索条）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "f") {
@@ -130,7 +133,7 @@ export function CodeEditor({
           setTimeout(() => searchInputRef.current?.focus(), 50);
         }
       }
-      if (e.key === "Escape" && showSearch) {
+      if (e.key === "Escape" && (showSearch || (persistentSearch && searchQuery))) {
         setShowSearch(false);
         setSearchQuery("");
       }
@@ -140,7 +143,7 @@ export function CodeEditor({
       container.addEventListener("keydown", handleKeyDown);
       return () => container.removeEventListener("keydown", handleKeyDown);
     }
-  }, [showSearch]);
+  }, [showSearch, persistentSearch, searchQuery]);
 
   // 滚动到当前匹配项
   useEffect(() => {
@@ -381,28 +384,8 @@ export function CodeEditor({
     setCurrentMatchIdx((prev) => (prev + 1) % matches.length);
   };
 
-  // 空内容（只读模式直接渲染空容器；可编辑模式不能提前返回，
-  // 否则空标签页没有 textarea，新建标签页将无法输入——见重放器）
-  if (!editable && (!value || !value.trim())) {
-    return (
-      <div
-        ref={containerRef}
-        style={{
-          display: "flex",
-          flex: 1,
-          minHeight: 0,
-          minWidth: 0,
-          overflow: "hidden",
-          background: "var(--bg-primary)",
-          position: "relative",
-          ...style,
-        }}
-      />
-    );
-  }
-
-  // ===== 搜索栏（两种模式共用） =====
-  const searchBar = showSearch && (
+  // ===== 搜索栏（两种模式共用；persistentSearch 模式改用底部常驻条，不再渲染浮层） =====
+  const searchBar = showSearch && !persistentSearch && (
     <div
       style={{
         position: "absolute",
@@ -502,6 +485,142 @@ export function CodeEditor({
     </div>
   );
 
+  // ===== 底部常驻搜索条（数据包详情）：始终显示，输入即增量高亮 =====
+  const bottomSearchBar = persistentSearch && (
+    <div
+      style={{
+        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: 5,
+        height: 26,
+        padding: "0 8px",
+        background: "var(--bg-secondary)",
+        borderTop: "1px solid var(--border-default)",
+        fontSize: 11,
+      }}
+    >
+      <Search size={11} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+      <input
+        ref={searchInputRef}
+        type="text"
+        placeholder="在本包内搜索（Enter 下一个 / Shift+Enter 上一个）"
+        value={searchQuery}
+        onChange={(e) => {
+          setSearchQuery(e.target.value);
+          setCurrentMatchIdx(0);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (e.shiftKey) handleSearchPrev();
+            else handleSearchNext();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            setSearchQuery("");
+          }
+        }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: 18,
+          padding: "0 6px",
+          fontSize: 11,
+          background: "var(--bg-primary)",
+          border: "1px solid var(--border-default)",
+          borderRadius: 3,
+          color: "var(--text-primary)",
+          outline: "none",
+        }}
+      />
+      {searchQuery && (
+        <span
+          style={{
+            fontSize: 10,
+            fontFamily: "var(--font-mono)",
+            color: matches.length > 0 ? "var(--text-muted)" : "var(--accent-orange)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {matches.length > 0 ? `${currentMatchIdx + 1}/${matches.length}` : "无匹配"}
+        </span>
+      )}
+      <button
+        onClick={handleSearchPrev}
+        disabled={matches.length === 0}
+        title="上一个 (Shift+Enter)"
+        style={{
+          padding: 1,
+          border: "none",
+          background: "transparent",
+          cursor: matches.length ? "pointer" : "inherit",
+          color: matches.length ? "var(--text-secondary)" : "var(--text-muted)",
+          opacity: matches.length ? 1 : 0.4,
+          display: "flex",
+        }}
+      >
+        <ChevronUp size={13} />
+      </button>
+      <button
+        onClick={handleSearchNext}
+        disabled={matches.length === 0}
+        title="下一个 (Enter)"
+        style={{
+          padding: 1,
+          border: "none",
+          background: "transparent",
+          cursor: matches.length ? "pointer" : "inherit",
+          color: matches.length ? "var(--text-secondary)" : "var(--text-muted)",
+          opacity: matches.length ? 1 : 0.4,
+          display: "flex",
+        }}
+      >
+        <ChevronDown size={13} />
+      </button>
+      <button
+        onClick={() => setSearchQuery("")}
+        disabled={!searchQuery}
+        title="清空 (Esc)"
+        style={{
+          padding: 1,
+          border: "none",
+          background: "transparent",
+          cursor: searchQuery ? "pointer" : "inherit",
+          color: "var(--text-muted)",
+          opacity: searchQuery ? 1 : 0.4,
+          display: "flex",
+        }}
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
+
+  // 空内容（只读模式直接渲染空容器；可编辑模式不能提前返回，
+  // 否则空标签页没有 textarea，新建标签页将无法输入——见重放器）
+  // 注意：必须放在 bottomSearchBar 定义之后（persistentSearch 时空容器也渲染搜索条）
+  if (!editable && (!value || !value.trim())) {
+    return (
+      <div
+        ref={containerRef}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          overflow: "hidden",
+          background: "var(--bg-primary)",
+          position: "relative",
+          ...style,
+        }}
+      >
+        {bottomSearchBar}
+      </div>
+    );
+  }
+
   // ===== 可编辑模式：独立行号栏 + textarea overlay =====
   if (editable) {
     return (
@@ -509,6 +628,7 @@ export function CodeEditor({
         ref={containerRef}
         style={{
           display: "flex",
+          flexDirection: "column",
           flex: 1,
           minHeight: 0,
           minWidth: 0,
@@ -519,6 +639,7 @@ export function CodeEditor({
         }}
         tabIndex={0}
       >
+        <div style={{ display: "flex", flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
         {searchBar}
 
         {/* 行号栏 */}
@@ -617,6 +738,8 @@ export function CodeEditor({
             }}
           />
         </div>
+        </div>
+        {bottomSearchBar}
       </div>
     );
   }
@@ -629,6 +752,7 @@ export function CodeEditor({
       className="text-selectable"
       style={{
         display: "flex",
+        flexDirection: "column",
         flex: 1,
         minHeight: 0,
         minWidth: 0,
@@ -639,6 +763,7 @@ export function CodeEditor({
       }}
       tabIndex={0}
     >
+      <div style={{ display: "flex", flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
       {searchBar}
 
       <div
@@ -659,6 +784,8 @@ export function CodeEditor({
       >
         {readonlyLines}
       </div>
+      </div>
+      {bottomSearchBar}
     </div>
   );
 }

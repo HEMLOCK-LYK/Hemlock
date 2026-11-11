@@ -69,6 +69,70 @@ GLOBAL_TYPES = {MEMORY_TYPE_USER, MEMORY_TYPE_FEEDBACK, MEMORY_TYPE_REFERENCE}
 # 知识库快照单库最大列出条目数（超过只列最近更新的，其余靠 get_memory 检索）
 KB_SNAPSHOT_MAX_ENTRIES = 100
 
+# 首次启动预置的默认知识库（空库）：不建出来 Agent 看不到库名、不知道往哪沉淀。
+# 只补缺不覆盖（升级兼容硬性要求）：已存在的同名库（哪怕有内容）一律不动；
+# 用户主动删除的预置库记录删除标记，之后不再自动重建。
+DEFAULT_KBS: list[tuple[str, str]] = [
+    ("绕WAF实战技巧", "WAF 拦截场景下的绕过实战技巧：编码变形、协议层绕过、规则差异利用等"),
+    ("nday利用指南", "已公开漏洞（nday）的复现与利用要点：指纹判别、利用链、常见坑"),
+    ("0day库", "0day 漏洞挖掘与验证记录：攻击面、PoC 思路、验证环境与证据"),
+]
+
+# 预置库删除标记文件（memories 根目录下的隐藏状态文件，老版本不识别、互不影响）
+_PRESET_TOMBSTONE = MEMORIES_DIR / ".kb_presets_deleted.json"
+_presets_checked = False
+
+
+def _read_preset_tombstone() -> set[str]:
+    """读取已删除预置库标记（文件缺失/损坏时返回空集）。"""
+    try:
+        data = json.loads(_PRESET_TOMBSTONE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(v) for v in data.get("deleted", [])}
+    except Exception:
+        pass
+    return set()
+
+
+def _mark_preset_deleted(safe_name: str) -> None:
+    """记录预置库删除标记（下次启动不再重建）。"""
+    deleted = _read_preset_tombstone()
+    if safe_name in deleted:
+        return
+    deleted.add(safe_name)
+    try:
+        _PRESET_TOMBSTONE.parent.mkdir(parents=True, exist_ok=True)
+        _PRESET_TOMBSTONE.write_text(
+            json.dumps({"deleted": sorted(deleted)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"写入预置库删除标记失败: {e}")
+
+
+def ensure_default_kbs() -> None:
+    """预置默认知识库（首次启动自动建空库）。
+
+    只补缺不覆盖：目录已存在（含用户自建的同名库、哪怕有内容）一律跳过；
+    用户删除过的预置库（有删除标记）不再重建。幂等，可重复调用。
+    """
+    global _presets_checked
+    _presets_checked = True
+    _ensure_dirs()
+    deleted = _read_preset_tombstone()
+    for name, desc in DEFAULT_KBS:
+        safe = _safe_name(name)
+        if safe in deleted:
+            continue
+        kb_path = KB_DIR / safe
+        if kb_path.is_dir():
+            continue
+        try:
+            create_kb(name, desc)
+            logger.info(f"已预置默认知识库: {safe}")
+        except Exception as e:
+            logger.warning(f"预置知识库失败 {name}: {e}")
+
 
 @dataclass
 class MemoryFile:
@@ -94,10 +158,12 @@ class MemoryFile:
 # ===== 目录管理 =====
 
 def _ensure_dirs() -> None:
-    """确保记忆目录结构存在。"""
+    """确保记忆目录结构存在（进程内首次调用时顺带预置默认知识库）。"""
     GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
     KB_DIR.mkdir(parents=True, exist_ok=True)
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    if not _presets_checked:
+        ensure_default_kbs()
 
 
 def _entry_dir(mem_type: str, project_id: str | None = None, kb: str | None = None) -> Path:
@@ -566,13 +632,15 @@ def create_kb(name: str, description: str = "") -> dict[str, Any]:
 
 
 def delete_kb(name: str) -> bool:
-    """删除知识库（连同库内全部条目）。"""
+    """删除知识库（连同库内全部条目）。预置库会记录删除标记，之后不再自动重建。"""
     safe = _safe_name(name)
     kb_path = KB_DIR / safe
     if not kb_path.is_dir():
         raise ValueError(f"知识库不存在: {safe}")
     import shutil
     shutil.rmtree(kb_path)
+    if any(safe == _safe_name(n) for n, _ in DEFAULT_KBS):
+        _mark_preset_deleted(safe)
     logger.info(f"删除知识库: {safe}")
     return True
 

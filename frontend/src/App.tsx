@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Sidebar } from "./components/Sidebar";
-import { StatusBar } from "./components/StatusBar";
 import { SecurityDeclaration, isSecurityAccepted } from "./components/SecurityDeclaration";
 import { FlowList } from "./views/FlowList";
 import { FlowDetail } from "./views/FlowDetail";
@@ -111,7 +110,8 @@ export default function App() {
             </Routes>
           </div>
         </div>
-        <StatusBar />
+        {/* 底部状态栏已移除：后端/WS 状态灯迁至侧边栏 footer（左下角），
+            释放底部空间给数据包详情的常驻搜索条 */}
       </div>
     </div>
   );

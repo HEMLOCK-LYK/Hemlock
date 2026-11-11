@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { RefreshCw, Search, Inbox, Repeat, Swords, Bot, Power, Wifi, Filter, X, ShieldOff, BarChart3, Globe, Tag, Trash2, Settings2, ExternalLink, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, KeyRound } from "lucide-react";
+import { RefreshCw, Search, Inbox, Repeat, Swords, Bot, Power, Wifi, Filter, X, ShieldOff, BarChart3, Tag, Trash2, Settings2, ExternalLink, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, KeyRound, SlidersHorizontal, Clock, RotateCcw } from "lucide-react";
 import { listFlows, getFlow, getNoiseStats, listNoiseFlows, markFlowNoise, getNoiseAnalysis, clearFlows, migrateFlowAuth } from "../api/flows";
 import type { NoiseAnalysisItem } from "../api/flows";
 import { FLOWTAG_COLORS } from "../api/flowtag";
@@ -84,6 +84,15 @@ function formatDuration(ms: number | null | undefined): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
+/** ISO 时间 → datetime-local 输入值（本地时区 "YYYY-MM-DDTHH:mm"） */
+function isoToLocalInput(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /** 耗时颜色：慢请求高亮（用于时间盲注识别） */
 function durationColor(ms: number | null | undefined): string {
   if (ms == null) return "var(--text-muted)";
@@ -122,7 +131,15 @@ export function FlowList() {
     host: "",
     source: "",
     status: "",
+    time_start: "",  // ISO 时间（含时区），空 = 不过滤
+    time_end: "",
   });
+
+  // ===== 筛选弹窗（点击「筛选」按钮弹出，替代原一排常驻输入框） =====
+  const [filterOpen, setFilterOpen] = useState(false);
+  const filterPopRef = useRef<HTMLDivElement>(null);
+  // 时间预设标识：'' = 不限 | '10m' | '1h' | '24h' | '7d' | 'custom'
+  const [timePreset, setTimePreset] = useState<string>("");
 
   // 仅看标签开关
   const [tagsOnly, setTagsOnly] = useState(false);
@@ -365,6 +382,8 @@ export function FlowList() {
         project_id: currentProjectId,
         hide_noise: hideNoise,
         search: searchKeyword.trim() || undefined,
+        time_start: filters.time_start || undefined,
+        time_end: filters.time_end || undefined,
       });
       setData(result);
     } catch (e) {
@@ -440,6 +459,133 @@ export function FlowList() {
     setFilters((prev) => ({ ...prev, [key]: value }));
     setPage(1);
   };
+
+  // ===== 筛选弹窗：时间预设 / 活跃筛选统计 / 弹窗外点击关闭 =====
+
+  const TIME_PRESETS: { key: string; label: string; ms: number }[] = [
+    { key: "10m", label: "最近10分钟", ms: 10 * 60 * 1000 },
+    { key: "1h", label: "最近1小时", ms: 60 * 60 * 1000 },
+    { key: "24h", label: "最近24小时", ms: 24 * 60 * 60 * 1000 },
+    { key: "7d", label: "最近7天", ms: 7 * 24 * 60 * 60 * 1000 },
+  ];
+
+  const handleTimePreset = (key: string, ms: number) => {
+    setTimePreset(key);
+    setFilters((prev) => ({
+      ...prev,
+      time_start: new Date(Date.now() - ms).toISOString(),
+      time_end: "",
+    }));
+    setPage(1);
+  };
+
+  const handleTimeCustom = (which: "start" | "end", localValue: string) => {
+    setTimePreset("custom");
+    setFilters((prev) => ({
+      ...prev,
+      [which === "start" ? "time_start" : "time_end"]: localValue
+        ? new Date(localValue).toISOString()
+        : "",
+    }));
+    setPage(1);
+  };
+
+  const handleClearTime = () => {
+    setTimePreset("");
+    setFilters((prev) => ({ ...prev, time_start: "", time_end: "" }));
+    setPage(1);
+  };
+
+  /** 活跃筛选条件（用于按钮徽标与可移除 chips） */
+  const activeFilters = useMemo(() => {
+    const chips: { key: string; label: string }[] = [];
+    if (searchKeyword.trim()) chips.push({ key: "search", label: `关键字: ${searchKeyword.trim()}` });
+    if (filters.host) chips.push({ key: "host", label: `Host: ${filters.host}` });
+    if (filters.url) chips.push({ key: "url", label: `URL: ${filters.url}` });
+    if (filters.method) chips.push({ key: "method", label: filters.method });
+    if (filters.source) chips.push({ key: "source", label: `来源: ${filters.source}` });
+    if (filters.status) chips.push({ key: "status", label: `状态 ${filters.status}` });
+    if (filters.time_start || filters.time_end) {
+      const preset = TIME_PRESETS.find((p) => p.key === timePreset);
+      chips.push({ key: "time", label: preset ? preset.label : "自定义时间" });
+    }
+    return chips;
+  }, [filters, timePreset, searchKeyword]);
+  const activeFilterCount = activeFilters.length;
+
+  const handleRemoveFilterChip = (key: string) => {
+    if (key === "time") {
+      handleClearTime();
+    } else if (key === "search") {
+      handleSearchChange("");
+    } else {
+      handleFilterChange(key, "");
+    }
+  };
+
+  const handleClearAllFilters = () => {
+    handleSearchChange("");
+    setFilters({ method: "", url: "", host: "", source: "", status: "", time_start: "", time_end: "" });
+    setTimePreset("");
+    setPage(1);
+  };
+
+  // 点击弹窗外关闭筛选弹窗
+  useEffect(() => {
+    if (!filterOpen) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      if (filterPopRef.current && !filterPopRef.current.contains(e.target as Node)) {
+        setFilterOpen(false);
+      }
+    };
+    const handlePopEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFilterOpen(false);
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handlePopEsc);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handlePopEsc);
+    };
+  }, [filterOpen]);
+
+  // ===== 方向键切换数据包：上下（及左右）在列表中移动选中项，代替页面滚动 =====
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const key = e.key;
+      if (key !== "ArrowUp" && key !== "ArrowDown" && key !== "ArrowLeft" && key !== "ArrowRight") return;
+      // 焦点在输入/编辑类元素（过滤器、可编辑编辑器等）时不劫持
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+      }
+      // 弹窗/菜单打开时不劫持
+      if (contextMenu || noiseModalOpen || flowtagModalOpen || filterOpen) return;
+      if (!sortedItems.length) return;
+      e.preventDefault();
+      const curIdx = sortedItems.findIndex((it) => it.id === selectedFlowId);
+      let nextIdx: number;
+      if (curIdx === -1) {
+        nextIdx = key === "ArrowUp" || key === "ArrowLeft" ? sortedItems.length - 1 : 0;
+      } else if (key === "ArrowUp" || key === "ArrowLeft") {
+        nextIdx = Math.max(0, curIdx - 1);
+      } else {
+        nextIdx = Math.min(sortedItems.length - 1, curIdx + 1);
+      }
+      const next = sortedItems[nextIdx];
+      if (!next || next.id === selectedFlowId) return;
+      handleRowClick(next);
+      setTimeout(() => {
+        document
+          .querySelector(`tr[data-flow-id="${next.id}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+      }, 0);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [sortedItems, selectedFlowId, handleRowClick, contextMenu, noiseModalOpen, flowtagModalOpen, filterOpen]);
 
   // 右键菜单
   const handleContextMenu = (e: React.MouseEvent, item: FlowListItem) => {
@@ -737,77 +883,203 @@ export function FlowList() {
         </div>
       </div>
 
-      {/* 过滤栏 */}
+      {/* 过滤栏：左侧「筛选」按钮弹出条件面板，激活条件以可移除 chips 展示 */}
       <div className="filter-bar">
-        <div className="filter-group">
-          {/* 全局搜索（匹配所有字段） */}
-          <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-            <Search size={14} style={{ position: "absolute", left: 8, color: "var(--text-muted)", pointerEvents: "none" }} />
-            <input
-              className="input"
-              style={{ paddingLeft: 28, width: 220, borderColor: searchKeyword ? "var(--accent-blue)" : undefined }}
-              placeholder="搜索所有字段（请求头/体/响应...）"
-              value={searchKeyword}
-              onChange={(e) => handleSearchChange(e.target.value)}
-              title="在所有数据包字段中搜索关键字"
-            />
-            {searchKeyword && (
-              <button
-                onClick={() => handleSearchChange("")}
+        <div ref={filterPopRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <button
+            className="btn btn-sm"
+            onClick={() => setFilterOpen((v) => !v)}
+            style={{
+              borderColor: activeFilterCount ? "var(--accent-blue)" : undefined,
+              color: activeFilterCount ? "var(--accent-blue)" : undefined,
+            }}
+            title="按关键字 / Host / URL / 方法 / 状态码 / 来源 / 时间筛选"
+          >
+            <SlidersHorizontal size={12} />
+            筛选
+            {activeFilterCount > 0 && (
+              <span
                 style={{
-                  position: "absolute",
-                  right: 4,
-                  border: "none",
-                  background: "transparent",
-                  cursor: "pointer",
-                  color: "var(--text-muted)",
-                  padding: 2,
-                  display: "flex",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  minWidth: 15,
+                  height: 15,
+                  lineHeight: "15px",
+                  borderRadius: 999,
+                  background: "var(--accent-blue)",
+                  color: "#fff",
+                  padding: "0 4px",
+                  textAlign: "center",
                 }}
-                title="清除搜索"
               >
-                <X size={12} />
-              </button>
+                {activeFilterCount}
+              </span>
             )}
-          </div>
-          <div className="filter-divider" style={{ margin: "0 4px" }} />
-          <Globe size={14} className="text-muted" />
-          <input
-            className="input"
-            style={{ width: 140 }}
-            placeholder="Host..."
-            value={filters.host}
-            onChange={(e) => handleFilterChange("host", e.target.value)}
-          />
-          <select
-            className="select"
-            value={filters.method}
-            onChange={(e) => handleFilterChange("method", e.target.value)}
-          >
-            <option value="">所有方法</option>
-            <option value="GET">GET</option>
-            <option value="POST">POST</option>
-            <option value="PUT">PUT</option>
-            <option value="DELETE">DELETE</option>
-            <option value="PATCH">PATCH</option>
-          </select>
-          <select
-            className="select"
-            value={filters.source}
-            onChange={(e) => handleFilterChange("source", e.target.value)}
-          >
-            <option value="">所有来源</option>
-            <option value="proxy">proxy</option>
-            <option value="repeater">repeater</option>
-            <option value="intruder">intruder</option>
-          </select>
-          <input
-            className="input"
-            style={{ width: 80 }}
-            placeholder="状态码"
-            value={filters.status}
-            onChange={(e) => handleFilterChange("status", e.target.value)}
-          />
+          </button>
+          {activeFilters.map((f) => (
+            <span key={f.key} className="flow-filter-chip" onClick={() => handleRemoveFilterChip(f.key)} title="点击移除该条件">
+              <span style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.label}</span>
+              <X size={10} style={{ flexShrink: 0 }} />
+            </span>
+          ))}
+          {filterOpen && (
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 8px)",
+                left: 0,
+                zIndex: 600,
+                width: 430,
+                maxWidth: "calc(100vw - 280px)",
+                padding: "14px 16px",
+                background: "var(--bg-secondary)",
+                border: "1px solid var(--border-default)",
+                borderRadius: 10,
+                boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 关键字（全字段） */}
+              <div>
+                <div className="flow-filter-label">关键字（全字段搜索）</div>
+                <div style={{ position: "relative" }}>
+                  <Search size={13} style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
+                  <input
+                    className="input"
+                    style={{ width: "100%", paddingLeft: 26, height: 28, fontSize: 12 }}
+                    placeholder="请求头/体、响应内容、URL..."
+                    value={searchKeyword}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+              </div>
+              {/* Host / URL */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <div className="flow-filter-label">Host（模糊）</div>
+                  <input
+                    className="input"
+                    style={{ width: "100%", height: 28, fontSize: 12 }}
+                    placeholder="example.com"
+                    value={filters.host}
+                    onChange={(e) => handleFilterChange("host", e.target.value)}
+                  />
+                </div>
+                <div>
+                  <div className="flow-filter-label">URL 包含</div>
+                  <input
+                    className="input"
+                    style={{ width: "100%", height: 28, fontSize: 12 }}
+                    placeholder="/api/login"
+                    value={filters.url}
+                    onChange={(e) => handleFilterChange("url", e.target.value)}
+                  />
+                </div>
+              </div>
+              {/* 方法 */}
+              <div>
+                <div className="flow-filter-label">方法</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => (
+                    <button
+                      key={m}
+                      className={`flow-chip${filters.method === m ? " active" : ""}`}
+                      onClick={() => handleFilterChange("method", filters.method === m ? "" : m)}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* 状态码 */}
+              <div>
+                <div className="flow-filter-label">状态码</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+                  {["200", "301", "302", "403", "404", "500"].map((s) => (
+                    <button
+                      key={s}
+                      className={`flow-chip${filters.status === s ? " active" : ""}`}
+                      onClick={() => handleFilterChange("status", filters.status === s ? "" : s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                  <input
+                    className="input"
+                    style={{ width: 84, height: 22, fontSize: 11, padding: "0 6px" }}
+                    placeholder="自定义"
+                    value={filters.status}
+                    onChange={(e) => handleFilterChange("status", e.target.value.replace(/\D/g, ""))}
+                    title="精确状态码，如 401"
+                  />
+                </div>
+              </div>
+              {/* 来源 */}
+              <div>
+                <div className="flow-filter-label">来源</div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {["proxy", "repeater", "intruder"].map((s) => (
+                    <button
+                      key={s}
+                      className={`flow-chip${filters.source === s ? " active" : ""}`}
+                      onClick={() => handleFilterChange("source", filters.source === s ? "" : s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {/* 时间范围 */}
+              <div>
+                <div className="flow-filter-label" style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <Clock size={11} />
+                  时间
+                </div>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {TIME_PRESETS.map((p) => (
+                    <button
+                      key={p.key}
+                      className={`flow-chip${timePreset === p.key ? " active" : ""}`}
+                      onClick={() => (timePreset === p.key ? handleClearTime() : handleTimePreset(p.key, p.ms))}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+                  <input
+                    type="datetime-local"
+                    className="input"
+                    style={{ flex: 1, minWidth: 0, height: 26, fontSize: 11 }}
+                    value={isoToLocalInput(filters.time_start)}
+                    onChange={(e) => handleTimeCustom("start", e.target.value)}
+                    title="起始时间（含）"
+                  />
+                  <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}>至</span>
+                  <input
+                    type="datetime-local"
+                    className="input"
+                    style={{ flex: 1, minWidth: 0, height: 26, fontSize: 11 }}
+                    value={isoToLocalInput(filters.time_end)}
+                    onChange={(e) => handleTimeCustom("end", e.target.value)}
+                    title="结束时间（含）"
+                  />
+                </div>
+              </div>
+              {/* footer */}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-subtle)", paddingTop: 10 }}>
+                <button className="btn btn-sm" onClick={handleClearAllFilters} disabled={!activeFilterCount} style={{ fontSize: 11 }}>
+                  <RotateCcw size={11} />
+                  重置全部
+                </button>
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>条件即时生效 · Esc 关闭</span>
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ flex: 1 }} />
         <div className="filter-divider" />
@@ -928,6 +1200,7 @@ export function FlowList() {
                         return (
                           <tr
                             key={item.id}
+                            data-flow-id={item.id}
                             onClick={() => handleRowClick(item)}
                             onDoubleClick={() => handleRowDoubleClick(item)}
                             onContextMenu={(e) => handleContextMenu(e, item)}
@@ -1058,6 +1331,7 @@ export function FlowList() {
                 return (
                 <tr
                   key={item.id}
+                  data-flow-id={item.id}
                   onClick={() => handleRowClick(item)}
                   onDoubleClick={() => handleRowDoubleClick(item)}
                   onContextMenu={(e) => handleContextMenu(e, item)}

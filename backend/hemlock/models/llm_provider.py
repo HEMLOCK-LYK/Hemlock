@@ -16,6 +16,7 @@ class LLMProvider(Base):
     base_url = Column(String(500), default="https://api.openai.com/v1")
     model = Column(String(100), default="gpt-4o-mini")   # 默认模型名
     context_window = Column(Integer, nullable=True)      # 上下文窗口（tokens），空=走兜底（1M/128K）
+    compact_limit = Column(Integer, nullable=True)       # 该模型的压缩阈值（tokens），空=走全局设置兜底（升级兼容）
     is_default = Column(Boolean, default=False)           # 是否默认（只能有一个）
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

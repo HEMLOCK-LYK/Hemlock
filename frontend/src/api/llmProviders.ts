@@ -10,6 +10,7 @@ export interface LLMProvider {
   base_url: string;
   model: string;
   context_window: number | null;
+  compact_limit: number | null;
   is_default: boolean;
   api_key_masked: string;
 }
@@ -27,6 +28,7 @@ export interface ProviderCreateRequest {
   base_url: string;
   model: string;
   context_window?: number | null;
+  compact_limit?: number | null;
   is_default?: boolean;
 }
 
@@ -38,6 +40,8 @@ export interface ProviderUpdateRequest {
   base_url?: string;
   model?: string;
   context_window?: number | null;
+  /** 0 = 清除（回到跟随全局设置） */
+  compact_limit?: number | null;
   is_default?: boolean;
 }
 

@@ -28,6 +28,14 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("数据库初始化完成")
 
+    # 预置默认知识库（绕WAF实战技巧 / nday利用指南 / 0day库，空库）。
+    # 只补缺不覆盖：已存在的同名库一律不动，用户删除过的有删除标记不会复活。
+    try:
+        from hemlock.core.memory_manager import ensure_default_kbs
+        ensure_default_kbs()
+    except Exception as e:
+        logger.warning(f"预置默认知识库失败（非致命）: {e}")
+
     # 清理上次服务异常退出遗留的悬挂任务
     try:
         from hemlock.services.agent_service import cleanup_stale_tasks

@@ -17,6 +17,8 @@ export async function listFlows(params: {
   host?: string;
   tags?: string;
   search?: string;
+  time_start?: string;
+  time_end?: string;
 }): Promise<FlowListResponse> {
   const { data } = await client.get<FlowListResponse>("/flows", { params });
   return data;

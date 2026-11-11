@@ -1,12 +1,30 @@
 """流量服务：查询、过滤、重放。"""
 
 import asyncio
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
 from hemlock.models.flow import Flow
 from hemlock.services.request_service import send_raw_request
 from hemlock.services.flowtag_engine import enrich_flow_fields
+
+
+def _parse_time_filter(value: str | None) -> datetime | None:
+    """解析 ISO 时间过滤参数，返回 naive UTC datetime（与 SQLite 存储对齐）。
+
+    兼容 "2026-11-11T12:00:00Z"、带时区偏移及无时区三种输入；
+    解析失败返回 None（忽略该条件，不报错——过滤条件宁缺勿炸）。
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def list_flows(
@@ -22,6 +40,8 @@ def list_flows(
     host: str | None = None,
     tags_only: bool = False,
     search: str | None = None,
+    time_start: str | None = None,
+    time_end: str | None = None,
 ) -> tuple[list[Flow], int]:
     """分页查询流量列表，返回 (items, total)。
 
@@ -30,6 +50,7 @@ def list_flows(
     当 source 参数显式指定为 "intruder" 时才包含（用于杂包管理等特殊场景）。
     host 模糊匹配 host 字段。
     tags_only=True 时仅返回 tags 非空的流量。
+    time_start/time_end（ISO 格式）按 Flow.timestamp 过滤时间范围。
     search 参数会在所有文本字段中模糊搜索（url, method, host, path,
     req_headers, req_body, resp_headers, resp_body, title, tags, mime_type）。
     """
@@ -49,6 +70,12 @@ def list_flows(
         q = q.filter(Flow.resp_status == status)
     if project_id:
         q = q.filter(Flow.project_id == project_id)
+    ts_start = _parse_time_filter(time_start)
+    if ts_start:
+        q = q.filter(Flow.timestamp >= ts_start)
+    ts_end = _parse_time_filter(time_end)
+    if ts_end:
+        q = q.filter(Flow.timestamp <= ts_end)
     if hide_noise:
         q = q.filter(Flow.is_noise == False)  # noqa: E712
     if host:

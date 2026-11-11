@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Activity,
@@ -23,7 +23,31 @@ import {
   Workflow,
 } from "lucide-react";
 import { useProject } from "../context/ProjectContext";
+import { useWebSocket } from "../hooks/useWebSocket";
 import { Spinner } from "./Common";
+
+/** 后端健康检查（10s 轮询 /health）——原底部状态栏的指示灯迁到侧边栏 footer */
+function useBackendHealth(): boolean | null {
+  const [online, setOnline] = useState<boolean | null>(null);
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const resp = await fetch("/health");
+        if (resp.ok) {
+          setOnline(true);
+          return;
+        }
+      } catch {
+        // ignore
+      }
+      setOnline(false);
+    };
+    check();
+    const timer = setInterval(check, 10000);
+    return () => clearInterval(timer);
+  }, []);
+  return online;
+}
 
 const navSections = [
   {
@@ -74,6 +98,8 @@ export function Sidebar() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [showSwitchPrompt, setShowSwitchPrompt] = useState(false);
+  const backendOnline = useBackendHealth();
+  const { connected: wsConnected } = useWebSocket(() => {});
 
   const isTemp = currentProject?.is_temp;
 
@@ -162,11 +188,33 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
-      <div className="sidebar-footer">
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Shield size={12} />
+      {/* 左下角状态区：后端/WS 指示灯 + 版本（原底部状态栏迁移至此，不占内容区空间） */}
+      <div className="sidebar-footer" style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 10 }}>
+        <span
+          style={{ display: "flex", alignItems: "center", gap: 4 }}
+          title={`后端服务: ${backendOnline ? "在线" : backendOnline === false ? "离线" : "检测中"}`}
+        >
+          <span
+            className={`status-dot ${backendOnline ? "online" : backendOnline === false ? "offline" : "unknown"}`}
+            style={{ width: 7, height: 7 }}
+          />
+          后端
+        </span>
+        <span
+          style={{ display: "flex", alignItems: "center", gap: 4 }}
+          title={`WebSocket: ${wsConnected ? "已连接" : "断开"}`}
+        >
+          <span
+            className={`status-dot ${wsConnected ? "online" : "offline"}`}
+            style={{ width: 7, height: 7 }}
+          />
+          WS
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <Shield size={11} />
           v0.9.0
-        </div>
+        </span>
       </div>
 
       {/* 保存项目弹窗 */}

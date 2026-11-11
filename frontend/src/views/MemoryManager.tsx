@@ -10,34 +10,37 @@ import {
 import { Spinner } from "../components/Common";
 import { MarkdownView } from "../components/MarkdownView";
 
+// 展示层只区分「知识库 / 经验（非知识库）」两类：
+// 内部 type（user/feedback/project/reference）保留不动，仅展示收敛为「经验」。
 const TYPE_LABELS: Record<MemoryType, string> = {
-  user: "使用者",
-  feedback: "反馈",
-  project: "项目",
-  reference: "参考",
+  user: "经验",
+  feedback: "经验",
+  project: "经验",
+  reference: "经验",
   kb: "知识库",
 };
 
 const TYPE_COLORS: Record<MemoryType, string> = {
   user: "var(--accent-blue)",
-  feedback: "var(--accent-yellow)",
-  project: "var(--accent-green)",
-  reference: "var(--text-muted)",
+  feedback: "var(--accent-blue)",
+  project: "var(--accent-blue)",
+  reference: "var(--accent-blue)",
   kb: "var(--accent-purple)",
 };
 
 // 作用域：长期记忆（经验 + 知识库，跨项目）/ 项目记忆（仅本项目）
 type Scope = "global" | "project";
 
-type FilterType = "all" | "user" | "feedback" | "reference" | "kb";
+type FilterType = "all" | "experience" | "kb";
 
 const FILTER_TABS: { value: FilterType; label: string }[] = [
   { value: "all", label: "全部" },
-  { value: "user", label: "使用者" },
-  { value: "feedback", label: "反馈" },
-  { value: "reference", label: "参考" },
+  { value: "experience", label: "经验" },
   { value: "kb", label: "知识库" },
 ];
+
+/** 非知识库、非项目的内部类型集合（展示层统一叫「经验」） */
+const EXPERIENCE_TYPES: MemoryType[] = ["user", "feedback", "reference"];
 
 interface EditorState {
   id: string | null;
@@ -104,12 +107,14 @@ export function MemoryManager() {
       } else if (filter === "kb") {
         // 知识库总览：显示库卡片，不列条目
         data = [];
-      } else if (filter === "all") {
+      } else if (filter === "experience") {
+        // 经验 = 非知识库（内部 user/feedback/reference，展示层收敛；排除项目记忆）
+        const resp = await memoryApi.list();
+        data = resp.memories.filter((m) => EXPERIENCE_TYPES.includes(m.type));
+      } else {
         // 长期记忆全部：经验 + 知识库条目（排除项目记忆）
         const resp = await memoryApi.list();
         data = resp.memories.filter((m) => m.type !== "project");
-      } else {
-        ({ memories: data } = await memoryApi.list(filter));
       }
       setMemories(data);
     } catch (e: unknown) {
@@ -482,7 +487,7 @@ export function MemoryManager() {
                 fontSize: 13,
               }}>
                 <BookOpen size={32} style={{ marginBottom: 12, opacity: 0.4 }} />
-                暂无知识库——点击右上角「新建知识库」，按类型积累（如 绕WAF实战技巧 / nday利用指南 / 0day库）
+                暂无知识库——点击右上角「新建知识库」，按类型积累实战知识
               </div>
             ) : (
               kbs.map((kb) => (
@@ -823,7 +828,7 @@ export function MemoryManager() {
                 />
               </div>
 
-              {/* Type（知识库条目锁定类型，仅显示归属库） */}
+              {/* 归属（知识库条目锁定类型，仅显示归属库；普通记忆只分 经验/项目，内部 type 自动保留） */}
               {editor.kb ? (
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, display: "block" }}>
@@ -844,29 +849,46 @@ export function MemoryManager() {
               ) : (
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, display: "block" }}>
-                    类型 <span style={{ color: "var(--accent-red)" }}>*</span>
+                    归属 <span style={{ color: "var(--accent-red)" }}>*</span>
                   </label>
                   <div style={{ display: "flex", gap: 4 }}>
-                    {(["user", "feedback", "project", "reference"] as MemoryType[]).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => setEditor({ ...editor, type: t })}
-                        style={{
-                          padding: "4px 12px",
-                          fontSize: 12,
-                          border: "1px solid var(--border-default)",
-                          borderRadius: 4,
-                          background: editor.type === t ? TYPE_COLORS[t] : "var(--bg-secondary)",
-                          color: editor.type === t ? "#fff" : "var(--text-secondary)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {TYPE_LABELS[t]}
-                      </button>
-                    ))}
+                    {([
+                      { value: "experience", label: "经验" },
+                      { value: "project", label: "项目" },
+                    ] as const).map((opt) => {
+                      const active = opt.value === "experience" ? editor.type !== "project" : editor.type === "project";
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() =>
+                            setEditor((prev) => ({
+                              ...prev,
+                              // 经验保留原内部类型（user/feedback/reference 不改写）；新条目/项目一律归一
+                              type:
+                                opt.value === "project"
+                                  ? "project"
+                                  : prev.id && EXPERIENCE_TYPES.includes(prev.type)
+                                  ? prev.type
+                                  : "feedback",
+                            }))
+                          }
+                          style={{
+                            padding: "4px 12px",
+                            fontSize: 12,
+                            border: "1px solid var(--border-default)",
+                            borderRadius: 4,
+                            background: active ? "var(--accent-blue)" : "var(--bg-secondary)",
+                            color: active ? "#fff" : "var(--text-secondary)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
                   </div>
                   <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
-                    想沉淀知识库条目（绕WAF技巧/nday指南等）？切到「长期记忆 → 知识库」新建库后在库内添加
+                    项目 = 仅对本项目生效的约束；经验 = 跨会话通用。想沉淀知识库条目（绕WAF技巧/nday指南等）？切到「长期记忆 → 知识库」在库内添加
                   </div>
                 </div>
               )}
@@ -910,7 +932,7 @@ export function MemoryManager() {
                 <textarea
                   className="input"
                   placeholder={
-                    !editor.kb && (editor.type === "feedback" || editor.type === "project")
+                    !editor.kb
                       ? "记忆正文...\n\n**Why:** 原因\n**How to apply:** 下次怎么做\n[[关联记忆名称]]"
                       : "记忆正文..."
                   }
@@ -924,9 +946,9 @@ export function MemoryManager() {
                     fontFamily: "inherit",
                   }}
                 />
-                {!editor.kb && (editor.type === "feedback" || editor.type === "project") && (
+                {!editor.kb && (
                   <div style={{ fontSize: 11, color: "var(--accent-yellow)", marginTop: 4 }}>
-                    {editor.type === "feedback" ? "反馈" : "项目"}类记忆必须包含 Why 和 How to apply
+                    经验类记忆建议包含 Why（原因）和 How to apply（下次怎么做）
                   </div>
                 )}
               </div>
@@ -984,7 +1006,7 @@ export function MemoryManager() {
                 </label>
                 <input
                   className="input"
-                  placeholder="如：绕WAF实战技巧 / nday利用指南 / 0day库"
+                  placeholder="如：指纹识别技巧 / 内网渗透笔记"
                   value={kbForm.name}
                   onChange={(e) => setKbForm({ ...kbForm, name: e.target.value })}
                   style={{ width: "100%", fontSize: 13 }}

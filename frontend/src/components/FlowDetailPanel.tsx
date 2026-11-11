@@ -229,12 +229,12 @@ export function FlowDetailPanel({
           storageKey={`${storageKeyPrefix}_split`}
           first={
             <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0 }}>
-              <CodeEditor value={reqContent} type="request" />
+              <CodeEditor value={reqContent} type="request" persistentSearch />
             </div>
           }
           second={
             <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0 }}>
-              <CodeEditor value={respContent} type="response" />
+              <CodeEditor value={respContent} type="response" persistentSearch />
             </div>
           }
         />

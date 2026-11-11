@@ -31,6 +31,7 @@ class ProviderCreateRequest(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     context_window: int | None = None   # 上下文窗口（tokens），空=走兜底
+    compact_limit: int | None = None    # 该模型的压缩阈值（tokens），空=走全局设置兜底
     is_default: bool = False
 
 
@@ -43,6 +44,7 @@ class ProviderUpdateRequest(BaseModel):
     base_url: str | None = None
     model: str | None = None
     context_window: int | None = None
+    compact_limit: int | None = None    # 0 = 清除（回到跟随全局设置）
     is_default: bool | None = None
 
 
@@ -55,6 +57,7 @@ class ProviderResponse(BaseModel):
     base_url: str
     model: str
     context_window: int | None = None
+    compact_limit: int | None = None
     is_default: bool
     # 注意：不返回 api_key 明文，只返回 masked 版本
     api_key_masked: str
@@ -89,6 +92,7 @@ def _to_response(provider: LLMProvider) -> ProviderResponse:
         base_url=provider.base_url,
         model=provider.model,
         context_window=provider.context_window,
+        compact_limit=getattr(provider, "compact_limit", None),
         is_default=provider.is_default,
         api_key_masked=_mask_api_key(provider.api_key),
     )
@@ -144,6 +148,7 @@ async def create_provider(req: ProviderCreateRequest, db: Session = Depends(get_
         base_url=req.base_url,
         model=req.model,
         context_window=req.context_window,
+        compact_limit=(req.compact_limit or None),
         is_default=req.is_default,
     )
 
@@ -175,6 +180,12 @@ async def update_provider(
         raise HTTPException(status_code=404, detail=f"Provider 不存在: {provider_id}")
 
     update_data = req.model_dump(exclude_none=True)
+
+    # 传 0 表示清除该字段（回到自动兜底/跟随全局设置）
+    if update_data.get("compact_limit", 1) == 0:
+        update_data["compact_limit"] = None
+    if update_data.get("context_window", 1) == 0:
+        update_data["context_window"] = None
 
     # 处理 is_default 互斥逻辑
     if update_data.get("is_default") is True:

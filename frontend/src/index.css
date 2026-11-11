@@ -77,18 +77,20 @@ input, textarea, select {
 /* ===== 自绘高对比鼠标指针 =====
    部分用户的系统指针是纯白配色：工字形（文本选择）指针落在白色可编辑区完全不可见。
    这里用双色自绘光标替代系统指针——箭头=白芯黑边、工字形=黑芯白边，浅色深色背景都可见。
+   比例对齐 Windows 标准指针：箭头窄身尖角（描边 1.0，miter 尖角连接），
+   工字形细笔画（黑芯 1.1 + 白晕 2.4），不做粗描边。
    不修改任何界面配色；有显式 cursor 规则的元素（按钮 pointer、拖拽 move 等）不受影响。 */
 body {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M2 1 L2 15.5 L5.8 12.2 L8.2 17.8 L10.9 16.6 L8.5 11.2 L13.5 11.2 Z' fill='%23ffffff' stroke='%23000000' stroke-width='1.2' stroke-linejoin='round'/%3E%3C/svg%3E") 2 1, default;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M3 1 L3 14.3 L6.4 11.2 L8.7 16.3 L11.2 15.2 L8.9 10.2 L13.3 10.2 Z' fill='%23ffffff' stroke='%23000000' stroke-width='1' stroke-linejoin='miter'/%3E%3C/svg%3E") 3 1, default;
 }
 
 input, textarea, [contenteditable="true"] {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%23ffffff' stroke-width='3.4' stroke-linecap='round'/%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%231a1a1a' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5.5 2.5 H10.5 M8 2.5 V13.5 M5.5 13.5 H10.5' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M5.5 2.5 H10.5 M8 2.5 V13.5 M5.5 13.5 H10.5' fill='none' stroke='%231a1a1a' stroke-width='1.1' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
 }
 
 /* 文本阅读/选择区（数据包详情、AI 回复等）：工字形指针 */
 .text-selectable {
-  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%23ffffff' stroke-width='3.4' stroke-linecap='round'/%3E%3Cpath d='M5 2 H11 M8 2 V14 M5 14 H11' fill='none' stroke='%231a1a1a' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'%3E%3Cpath d='M5.5 2.5 H10.5 M8 2.5 V13.5 M5.5 13.5 H10.5' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M5.5 2.5 H10.5 M8 2.5 V13.5 M5.5 13.5 H10.5' fill='none' stroke='%231a1a1a' stroke-width='1.1' stroke-linecap='round'/%3E%3C/svg%3E") 8 8, text;
 }
 
 /* 可编辑元素光标颜色显式跟随主题文本色（浅色主题下即黑色）。
@@ -242,31 +244,13 @@ textarea {
   flex-direction: column;
 }
 
-/* Status bar */
-.status-bar {
-  height: var(--statusbar-height);
-  min-height: var(--statusbar-height);
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border-default);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  gap: 16px;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.status-bar-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
+/* 状态指示（原底部状态栏已移除，指示灯迁至侧边栏 footer） */
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   display: inline-block;
+  flex-shrink: 0;
 }
 
 .status-dot.online { background: var(--accent-green); }
@@ -397,15 +381,16 @@ textarea {
 /* Method badge */
 .method-badge {
   display: inline-block;
-  padding: 1px 6px;
+  padding: 0 5px;
   border-radius: var(--radius-sm);
   font-size: 10px;
   font-weight: 700;
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  min-width: 40px;
+  min-width: 34px;
   text-align: center;
+  line-height: 16px;
 }
 .method-badge.GET { color: var(--method-get); background: rgba(88,166,255,0.12); }
 .method-badge.POST { color: var(--method-post); background: rgba(63,185,80,0.12); }
@@ -417,13 +402,14 @@ textarea {
 /* Status code */
 .status-code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 1px 6px;
+  padding: 0 5px;
   border-radius: var(--radius-sm);
-  min-width: 28px;
+  min-width: 24px;
   text-align: center;
   display: inline-block;
+  line-height: 16px;
 }
 .status-code.s2 { color: var(--status-2xx); background: rgba(63,185,80,0.12); }
 .status-code.s3 { color: var(--status-3xx); background: rgba(88,166,255,0.12); }
@@ -450,17 +436,17 @@ textarea {
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .data-table th {
   text-align: left;
-  padding: 6px 12px;
+  padding: 4px 8px;
   font-weight: 600;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-default);
   position: sticky;
@@ -470,7 +456,7 @@ textarea {
 }
 
 .data-table td {
-  padding: 5px 12px;
+  padding: 2px 8px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: middle;
@@ -884,7 +870,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 5px 12px;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border-default);
   flex-wrap: wrap;
@@ -896,6 +882,61 @@ textarea {
 
 .filter-bar .select {
   width: auto;
+}
+
+/* ===== 流量筛选弹窗（非标准 CRUD 样式：轻量 chips + 分组标签） ===== */
+.flow-filter-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.flow-chip {
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.12s;
+  line-height: 16px;
+}
+
+.flow-chip:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.flow-chip.active {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+  font-weight: 600;
+}
+
+.flow-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(88, 166, 255, 0.1);
+  color: var(--accent-blue);
+  cursor: pointer;
+  max-width: 280px;
+  line-height: 16px;
+  user-select: none;
+}
+
+.flow-filter-chip:hover {
+  background: rgba(88, 166, 255, 0.18);
 }
 
 /* Badge */

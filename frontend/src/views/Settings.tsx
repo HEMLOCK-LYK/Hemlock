@@ -100,8 +100,10 @@ export function Settings() {
   const [llmAssistedVerify, setLlmAssistedVerify] = useState(false);
   const [sensitiveOpConfirm, setSensitiveOpConfirm] = useState(true);
   const [browserHeaded, setBrowserHeaded] = useState(false);
-  const [compactLimit, setCompactLimit] = useState<number>(200_000);
   const [showRiskWarning, setShowRiskWarning] = useState(false);
+  // 上下文压缩阈值已移至「API Key 管理」按模型设置；此处不再编辑。
+  // 全局 compact_limit_tokens 仍作为未单独设置的模型的后端兜底（旧版本配置继续生效），
+  // 所以加载时仍读取、保存时不回写，避免覆盖用户旧配置。
 
   // ===== 代理设置 =====
   const [proxyHost, setProxyHost] = useState("127.0.0.1");
@@ -151,7 +153,6 @@ export function Settings() {
         setLlmAssistedVerify(settingsData.llm_assisted_verify_enabled ?? false);
         setSensitiveOpConfirm(settingsData.sensitive_op_confirm ?? true);
         setBrowserHeaded(settingsData.browser_headed ?? false);
-        setCompactLimit(settingsData.compact_limit_tokens ?? 200_000);
         setProxyHost(settingsData.proxy_host || "127.0.0.1");
         setProxyPort(settingsData.proxy_port ?? 8080);
         setUpstreamProxy(settingsData.upstream_proxy || "");
@@ -200,11 +201,12 @@ export function Settings() {
   const handleSaveAgent = async () => {
     setSavingAgent(true);
     try {
+      // 不回写 compact_limit_tokens：压缩阈值改在「API Key 管理」按模型设置，
+      // 全局值保持原样作为未单独设置的模型的兜底
       await settingsApi.update({
         llm_assisted_verify_enabled: llmAssistedVerify,
         sensitive_op_confirm: sensitiveOpConfirm,
         browser_headed: browserHeaded,
-        compact_limit_tokens: Math.max(16_384, Math.floor(compactLimit) || 200_000),
       } as Partial<AppSettings>);
       showToast("success", "Agent 配置已保存");
     } catch (err) {
@@ -660,61 +662,9 @@ export function Settings() {
             </button>
           </div>
 
-          {/* 上下文压缩阈值 */}
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
-              上下文压缩阈值
-            </div>
-            <div className="text-xs text-muted" style={{ maxWidth: 480, marginBottom: 8 }}>
-              对话历史累积超过该值才压缩一次（压缩会把早期对话替换为进展摘要）。阈值越低压缩越频繁、摘要失真越多；声明 1M 上下文的模型也不建议用满，按经验 400K 是摘要质量与累积长度的平衡点。实际触发不会超过模型窗口的 80%。
-            </div>
-            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              {([
-                { v: 200_000, label: "200K", tag: "默认" },
-                { v: 400_000, label: "400K", tag: "推荐" },
-                { v: 600_000, label: "600K", tag: "" },
-                { v: 1_000_000, label: "1M", tag: "" },
-              ] as const).map((p) => (
-                <button
-                  key={p.v}
-                  onClick={() => setCompactLimit(p.v)}
-                  style={{
-                    padding: "4px 12px",
-                    fontSize: 12,
-                    border: compactLimit === p.v ? "1px solid var(--accent-blue)" : "1px solid var(--border-default)",
-                    borderRadius: 4,
-                    background: compactLimit === p.v ? "var(--accent-blue)" : "var(--bg-secondary)",
-                    color: compactLimit === p.v ? "#fff" : "var(--text-secondary)",
-                    cursor: "pointer",
-                  }}
-                >
-                  {p.label}
-                  {p.tag && (
-                    <span style={{
-                      marginLeft: 5,
-                      fontSize: 9,
-                      padding: "0 4px",
-                      borderRadius: 3,
-                      background: compactLimit === p.v ? "rgba(255,255,255,0.25)" : "var(--bg-active)",
-                      color: compactLimit === p.v ? "#fff" : "var(--text-secondary)",
-                    }}>
-                      {p.tag}
-                    </span>
-                  )}
-                </button>
-              ))}
-              <input
-                className="input"
-                type="number"
-                min={16384}
-                step={10_000}
-                value={compactLimit}
-                onChange={(e) => setCompactLimit(parseInt(e.target.value, 10) || 0)}
-                style={{ width: 110, height: 28, fontSize: 12 }}
-                title="自定义阈值（tokens），最小 16384"
-              />
-              <span className="text-xs text-muted">tokens</span>
-            </div>
+          {/* 上下文压缩阈值已移至「API Key 管理」按模型设置（多 Key 窗口不同，统一阈值会失真） */}
+          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 6, background: "var(--bg-tertiary)", fontSize: 12, color: "var(--text-muted)" }}>
+            上下文压缩阈值已移至 <a href="#/llm-providers" style={{ color: "var(--accent-blue)", textDecoration: "none", fontWeight: 500 }}>API Key 管理</a>，按模型分别设置（不同 Key 窗口不同）；此处原全局配置继续对未单独设置的模型生效。
           </div>
 
           {/* 关闭敏感确认的风险提示弹窗 */}
