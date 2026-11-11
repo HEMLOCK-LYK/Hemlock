@@ -21,6 +21,7 @@ import { llmProvidersApi, type LLMProvider } from "../api/llmProviders";
 import { getCertInfo, installCert, uninstallCert, getCertDownloadUrl } from "../api/proxy";
 import type { CertInfo } from "../api/proxy";
 import { useTheme } from "../context/ThemeContext";
+import { setHintsEnabled } from "../utils/hints";
 import { THEME_VARS } from "../themes";
 import type { ThemeName } from "../themes";
 import { resetSecurityDeclaration } from "../components/SecurityDeclaration";
@@ -100,6 +101,7 @@ export function Settings() {
   const [llmAssistedVerify, setLlmAssistedVerify] = useState(false);
   const [sensitiveOpConfirm, setSensitiveOpConfirm] = useState(true);
   const [browserHeaded, setBrowserHeaded] = useState(false);
+  const [inputHintsEnabled, setInputHintsEnabled] = useState(true);
   const [showRiskWarning, setShowRiskWarning] = useState(false);
   // 上下文压缩阈值已移至「API Key 管理」按模型设置；此处不再编辑。
   // 全局 compact_limit_tokens 仍作为未单独设置的模型的后端兜底（旧版本配置继续生效），
@@ -153,6 +155,8 @@ export function Settings() {
         setLlmAssistedVerify(settingsData.llm_assisted_verify_enabled ?? false);
         setSensitiveOpConfirm(settingsData.sensitive_op_confirm ?? true);
         setBrowserHeaded(settingsData.browser_headed ?? false);
+        setInputHintsEnabled(settingsData.input_hints_enabled ?? true);
+        setHintsEnabled(settingsData.input_hints_enabled ?? true);
         setProxyHost(settingsData.proxy_host || "127.0.0.1");
         setProxyPort(settingsData.proxy_port ?? 8080);
         setUpstreamProxy(settingsData.upstream_proxy || "");
@@ -207,7 +211,9 @@ export function Settings() {
         llm_assisted_verify_enabled: llmAssistedVerify,
         sensitive_op_confirm: sensitiveOpConfirm,
         browser_headed: browserHeaded,
+        input_hints_enabled: inputHintsEnabled,
       } as Partial<AppSettings>);
+      setHintsEnabled(inputHintsEnabled);
       showToast("success", "Agent 配置已保存");
     } catch (err) {
       showToast("error", err instanceof Error ? err.message : "保存失败");
@@ -659,6 +665,43 @@ export function Settings() {
               }}
             >
               {browserHeaded ? "已启用" : "已关闭"}
+            </button>
+          </div>
+
+          {/* 输入框引导提示开关 */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
+                输入框引导提示
+              </div>
+              <div className="text-xs text-muted" style={{ maxWidth: 420 }}>
+                开启后 AI 输入框展示使用引导话术（如「输入帮我测试 https://xxx.com 即可自动启动安全测试」）。用惯了可以关闭，只保留简短操作提示。
+              </div>
+            </div>
+            <button
+              className="btn btn-sm"
+              onClick={() => setInputHintsEnabled(!inputHintsEnabled)}
+              style={{
+                background: inputHintsEnabled
+                  ? "rgba(46, 160, 67, 0.12)"
+                  : "rgba(248, 81, 73, 0.12)",
+                border: inputHintsEnabled
+                  ? "1px solid var(--accent-green)"
+                  : "1px solid var(--accent-red)",
+                color: inputHintsEnabled
+                  ? "var(--accent-green)"
+                  : "var(--accent-red)",
+                flexShrink: 0,
+              }}
+            >
+              {inputHintsEnabled ? "已启用" : "已关闭"}
             </button>
           </div>
 
@@ -1202,7 +1245,7 @@ export function Settings() {
               <span className="text-muted" style={{ minWidth: 64 }}>
                 版本
               </span>
-              <span>Hemlock v0.9.0</span>
+              <span>Hemlock v0.9.1</span>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <span className="text-muted" style={{ minWidth: 64 }}>

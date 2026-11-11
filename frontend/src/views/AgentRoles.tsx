@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { collabApi, type RoleSummary, type RoleDetail } from "../api/collab";
 import { MarkdownView } from "../components/MarkdownView";
+import { MarkdownEditor } from "../components/MarkdownEditor";
 
 type ToastType = "success" | "error";
 interface ToastState {
@@ -68,8 +69,7 @@ export function AgentRoles() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [viewingRole, setViewingRole] = useState<RoleDetail | null>(null);
-  // 编辑表单：编辑原文 / 渲染预览 切换
-  const [previewMode, setPreviewMode] = useState(false);
+  // 编辑表单：MarkdownEditor 编辑+实时渲染并排（不再做纯源码模式）
 
   const showToast = useCallback((type: ToastType, msg: string) => {
     setToast({ type, msg });
@@ -96,7 +96,6 @@ export function AgentRoles() {
     setForm(emptyForm);
     setEditingName(null);
     setShowForm(true);
-    setPreviewMode(false);
   };
 
   const handleEdit = async (name: string) => {
@@ -111,7 +110,6 @@ export function AgentRoles() {
       });
       setEditingName(name);
       setShowForm(true);
-      setPreviewMode(false);
     } catch (e) {
       showToast("error", `获取角色详情失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -423,81 +421,22 @@ export function AgentRoles() {
                 </select>
               </div>
 
-              {/* 系统提示词（编辑 / 渲染预览切换） */}
+              {/* 系统提示词：编辑 + 实时渲染并排（不做纯源码模式） */}
               <div>
                 <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
                   <label style={{ ...labelStyle, marginBottom: 0, flex: 1 }}>
                     系统提示词 (Markdown)
                   </label>
-                  <div style={{ display: "flex", gap: 0 }}>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewMode(false)}
-                      style={{
-                        padding: "2px 10px",
-                        fontSize: 11,
-                        border: "1px solid var(--border-default)",
-                        borderRadius: "4px 0 0 4px",
-                        background: !previewMode ? "var(--accent-blue)" : "var(--bg-secondary)",
-                        color: !previewMode ? "#fff" : "var(--text-secondary)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      编辑
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewMode(true)}
-                      style={{
-                        padding: "2px 10px",
-                        fontSize: 11,
-                        border: "1px solid var(--border-default)",
-                        borderLeft: "none",
-                        borderRadius: "0 4px 4px 0",
-                        background: previewMode ? "var(--accent-blue)" : "var(--bg-secondary)",
-                        color: previewMode ? "#fff" : "var(--text-secondary)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      预览
-                    </button>
-                  </div>
                 </div>
-                {previewMode ? (
-                  <div
-                    style={{
-                      ...inputStyle,
-                      minHeight: 300,
-                      padding: 12,
-                      overflow: "auto",
-                      resize: "vertical",
-                    }}
-                  >
-                    {form.system_prompt.trim() ? (
-                      <MarkdownView content={form.system_prompt} />
-                    ) : (
-                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>（暂无内容，切回「编辑」填写）</span>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <textarea
-                      style={{
-                        ...inputStyle,
-                        minHeight: 300,
-                        fontFamily: "var(--font-mono)",
-                        resize: "vertical",
-                        lineHeight: 1.6,
-                      }}
-                      value={form.system_prompt}
-                      onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
-                      placeholder={"# 角色：你的角色名\n\n## 角色定位\n描述这个角色的职责..."}
-                    />
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
-                      语法速记：标题 <code># </code>/<code>## </code>（# 后必须有空格，否则不生效）· 列表 <code>- </code>（同样需要空格）· 加粗 <code>**文字**</code> · 行内代码 <code>`文字`</code>。拿不准就切「预览」看效果。
-                    </div>
-                  </>
-                )}
+                <MarkdownEditor
+                  value={form.system_prompt}
+                  onChange={(v) => setForm({ ...form, system_prompt: v })}
+                  minHeight={300}
+                  placeholder={"# 角色：你的角色名\n\n## 角色定位\n描述这个角色的职责..."}
+                />
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                  语法速记：标题 <code># </code>/<code>## </code>（# 后必须有空格，否则不生效）· 列表 <code>- </code>（同样需要空格）· 加粗 <code>**文字**</code> · 行内代码 <code>`文字`</code>。
+                </div>
               </div>
 
               {/* 保存按钮 */}

@@ -22,6 +22,7 @@ export interface AppSettings {
   sensitive_op_confirm: boolean;
   browser_headed: boolean;
   compact_limit_tokens: number;
+  input_hints_enabled: boolean;
 }
 
 // LLM 服务商信息

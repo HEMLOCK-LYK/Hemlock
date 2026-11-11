@@ -29,6 +29,7 @@ import { settingsApi } from "../api/settings";
 import { collabApi, type RoleSummary } from "../api/collab";
 import { llmProvidersApi, type LLMProvider } from "../api/llmProviders";
 import { useProject } from "../context/ProjectContext";
+import { useHints } from "../utils/hints";
 import { usePacket } from "../context/PacketContext";
 import { MarkdownView } from "../components/MarkdownView";
 import type {
@@ -492,6 +493,7 @@ function renderResultWithLinks(
 
 export function AgentView() {
   const { currentProject } = useProject();
+  const hints = useHints();
   const navigate = useNavigate();
   const { pendingPacket, target, consume, sendToRepeater } = usePacket();
 
@@ -2043,7 +2045,7 @@ export function AgentView() {
                   }}
                   value={collabGoal}
                   onChange={(e) => setCollabGoal(e.target.value)}
-                  placeholder="对该目标进行全面安全测试"
+                  placeholder={hints ? "对该目标进行全面安全测试" : ""}
                 />
               </div>
 
@@ -2329,7 +2331,9 @@ export function AgentView() {
                   ref={inputRef}
                   className="agent-chat-input"
                   placeholder={
-                    pendingPreview
+                    !hints
+                      ? ""
+                      : pendingPreview
                       ? "输入指令（可选），Enter 发送数据包给 AI..."
                       : srcHuntingEnabled
                       ? "输入「挖 xxx.com」或集团名开始 SRC 漏洞挖掘... (Enter 发送，Shift+Enter 换行)"

@@ -42,6 +42,8 @@ def list_flows(
     search: str | None = None,
     time_start: str | None = None,
     time_end: str | None = None,
+    exclude_images: bool = False,
+    mime_type: str | None = None,
 ) -> tuple[list[Flow], int]:
     """分页查询流量列表，返回 (items, total)。
 
@@ -51,10 +53,16 @@ def list_flows(
     host 模糊匹配 host 字段。
     tags_only=True 时仅返回 tags 非空的流量。
     time_start/time_end（ISO 格式）按 Flow.timestamp 过滤时间范围。
+    exclude_images=True 时排除 mime_type 为 image/* 的流量（默认列表降噪用）。
+    mime_type 非空时按 mime_type 模糊匹配（如 "json"、"javascript"）。
     search 参数会在所有文本字段中模糊搜索（url, method, host, path,
     req_headers, req_body, resp_headers, resp_body, title, tags, mime_type）。
+
+    性能：列表项从不读取 req_body/resp_body 大列（defer），
+    避免分页轮询时把几 MB 的响应体整块拖进 ORM——列表响应本身也是精简 schema。
     """
     from sqlalchemy import or_
+    from sqlalchemy.orm import defer
 
     q = db.query(Flow)
     if method:
@@ -82,6 +90,20 @@ def list_flows(
         q = q.filter(Flow.host.contains(host))
     if tags_only:
         q = q.filter(Flow.tags != None, Flow.tags != "")  # noqa: E711
+    if exclude_images:
+        # 排除图片流量：mime_type 为 NULL/空 的不算图片，需保留（NOT LIKE 不会匹配 NULL）
+        q = q.filter(
+            or_(
+                Flow.mime_type.is_(None),
+                Flow.mime_type == "",
+                ~Flow.mime_type.like("image/%"),
+            )
+        )
+    if mime_type:
+        # 支持逗号分隔多个关键字（常见类型 chips 多选 + 自定义），任一包含即命中
+        mimes = [m.strip() for m in mime_type.split(",") if m.strip()]
+        if mimes:
+            q = q.filter(or_(*[Flow.mime_type.contains(m) for m in mimes]))
     if search:
         # 全字段搜索：在所有文本字段中模糊匹配关键字
         keyword = f"%{search}%"
@@ -104,7 +126,8 @@ def list_flows(
 
     total = q.count()
     items = (
-        q.order_by(desc(Flow.timestamp))
+        q.options(defer(Flow.req_body), defer(Flow.resp_body))
+        .order_by(desc(Flow.timestamp))
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()

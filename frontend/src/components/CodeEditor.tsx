@@ -1,7 +1,9 @@
 import { useRef, useMemo, useCallback, useState, useEffect } from "react";
 import type { ReactNode } from "react";
+import { js as beautifyJs } from "js-beautify";
 import { tokenizePacket, COLOR, getPacketBodyMode } from "../utils/packetTokenize";
 import type { Segment } from "../utils/packetTokenize";
+import { useHints } from "../utils/hints";
 import { Search, X, ChevronUp, ChevronDown } from "lucide-react";
 
 /**
@@ -39,6 +41,10 @@ const GUTTER_WIDTH_EDITABLE = 36;
 const SEARCH_HIGHLIGHT_BG = "rgba(255, 213, 0, 0.35)";
 const SEARCH_HIGHLIGHT_ACTIVE_BG = "rgba(255, 145, 0, 0.55)";
 
+// 只读模式单行懒渲染阈值（字符）：超过则默认只渲染前段，用户点击后渲染完整行。
+// 原始数据与搜索计数不受影响——这是渲染优化，不是数据截断。
+const MAX_LINE_DISPLAY = 100_000;
+
 interface CodeEditorProps {
   value: string;
   onChange?: (value: string) => void;
@@ -74,6 +80,7 @@ export function CodeEditor({
   const preRef = useRef<HTMLDivElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const hints = useHints();
 
   // 搜索状态
   const [showSearch, setShowSearch] = useState(false);
@@ -81,26 +88,50 @@ export function CodeEditor({
   const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // 词法分析
-  const lines = useMemo(() => tokenizePacket(value, type), [value, type]);
-
-  // 换行策略：表单数据不换行（同 Burp Suite），JSON/HTML 等可换行
-  const shouldWrap = useMemo(() => {
-    const bodyMode = getPacketBodyMode(value);
-    return bodyMode !== "form";
+  // 超长行懒渲染：用户点击「渲染完整内容」的行号集合（切包时重置）
+  const [expandedLines, setExpandedLines] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    setExpandedLines(new Set());
   }, [value]);
+
+  // ===== JS 美化（模拟浏览器 DevTools pretty-print）=====
+  // 只读 + JS body 时可格式化压缩 JS；原始 value 不变，只影响显示
+  const [prettyJs, setPrettyJs] = useState(false);
+  const prettyCacheRef = useRef<{ src: string; out: string } | null>(null);
+
+  // 换行策略：表单数据不换行（同 Burp Suite），JSON/HTML/JS 等可换行
+  const packetMode = useMemo(() => getPacketBodyMode(value), [value]);
+  const shouldWrap = packetMode !== "form";
+  // 只读模式下压缩 JS（>1KB）可格式化
+  const canPrettyJs = !editable && packetMode === "js" && value.length > 1000;
+
+  // 显示值：美化开关打开且可美化时用格式化结果（缓存，同 value 不重复计算）
+  const displayValue = useMemo(() => {
+    if (!prettyJs || !canPrettyJs) return value;
+    if (prettyCacheRef.current?.src === value) return prettyCacheRef.current.out;
+    try {
+      const out = beautifyJs(value, { indent_size: 2, wrap_line_length: 0 });
+      prettyCacheRef.current = { src: value, out };
+      return out;
+    } catch {
+      return value;
+    }
+  }, [prettyJs, canPrettyJs, value]);
+
+  // 词法分析（基于显示值——格式化后按格式化文本高亮/搜索）
+  const lines = useMemo(() => tokenizePacket(displayValue, type), [displayValue, type]);
 
   // 行数
   const lineCount = useMemo(() => {
-    return Math.max(value.split("\n").length, 1);
-  }, [value]);
+    return Math.max(displayValue.split("\n").length, 1);
+  }, [displayValue]);
 
-  // 搜索匹配结果
+  // 搜索匹配结果（基于显示值——格式化后按格式化文本搜索）
   const matches = useMemo((): SearchMatch[] => {
     if (!searchQuery.trim()) return [];
     const results: SearchMatch[] = [];
     const query = searchQuery.toLowerCase();
-    const rawLines = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    const rawLines = displayValue.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     for (let i = 0; i < rawLines.length; i++) {
       const line = rawLines[i].toLowerCase();
       let start = 0;
@@ -112,7 +143,7 @@ export function CodeEditor({
       }
     }
     return results;
-  }, [searchQuery, value]);
+  }, [searchQuery, displayValue]);
 
   // 当前匹配索引范围修正
   useEffect(() => {
@@ -263,11 +294,29 @@ export function CodeEditor({
   const readonlyLines = useMemo((): ReactNode[] => {
     return lines.map((lineSegs: Segment[], i: number) => {
       let colOffset = 0;
-      const segsWithCol = lineSegs.map((seg) => {
+      let segsWithCol = lineSegs.map((seg) => {
         const start = colOffset;
         colOffset += seg.text.length;
         return { ...seg, startCol: start, endCol: colOffset };
       });
+
+      // 超长行懒渲染（不截断数据）：浏览器对无断点超长文本做 pre-wrap 排版是秒级卡顿
+      // （如 3.8MB 压缩 JS 单行）。默认只渲染前段 + 「点击渲染完整内容」按钮，由用户决定
+      // 是否渲染全行；原始 value 与搜索计数始终完整。
+      const lineTotal = segsWithCol.length ? segsWithCol[segsWithCol.length - 1].endCol : 0;
+      let lazyCapped = false;
+      if (lineTotal > MAX_LINE_DISPLAY && !expandedLines.has(i)) {
+        lazyCapped = true;
+        const capped: typeof segsWithCol = [];
+        let col = 0;
+        for (const s of segsWithCol) {
+          if (col >= MAX_LINE_DISPLAY) break;
+          const take = Math.min(s.text.length, MAX_LINE_DISPLAY - col);
+          capped.push({ ...s, text: s.text.slice(0, take), startCol: col, endCol: col + take });
+          col += take;
+        }
+        segsWithCol = capped;
+      }
 
       const isFirst = i === 0;
       const isLast = i === lines.length - 1;
@@ -317,11 +366,31 @@ export function CodeEditor({
             {segsWithCol.length === 0
               ? "\u00A0"
               : segsWithCol.map((seg, j) => renderSegment(seg, i, j))}
+            {lazyCapped && (
+              <span
+                onClick={() =>
+                  setExpandedLines((prev) => {
+                    const next = new Set(prev);
+                    next.add(i);
+                    return next;
+                  })
+                }
+                style={{
+                  color: "var(--accent-orange)",
+                  fontWeight: "bold",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                }}
+                title="\u6E32\u67D3\u5B8C\u6574\u884C\uFF08\u6570\u636E\u4E0D\u622A\u65AD\uFF0C\u4EC5\u63A8\u8FDF\u6392\u7248\uFF09"
+              >
+                {` \u2026\uFF3B\u672C\u884C ${(lineTotal / 1024).toFixed(0)}KB\u2014\u2014\u70B9\u51FB\u6E32\u67D3\u5B8C\u6574\u5185\u5BB9\uFF3D`}
+              </span>
+            )}
           </div>
         </div>
       );
     });
-  }, [lines, searchQuery, lineMatchMap, currentMatchIdx, shouldWrap]);
+  }, [lines, searchQuery, lineMatchMap, currentMatchIdx, shouldWrap, expandedLines]);
 
   // ===== 可编辑模式：独立行号 + pre 不换行 =====
   const editableLines = useMemo((): ReactNode[] => {
@@ -407,7 +476,7 @@ export function CodeEditor({
       <input
         ref={searchInputRef}
         type="text"
-        placeholder="搜索..."
+        placeholder={hints ? "搜索..." : ""}
         value={searchQuery}
         onChange={(e) => {
           setSearchQuery(e.target.value);
@@ -504,7 +573,7 @@ export function CodeEditor({
       <input
         ref={searchInputRef}
         type="text"
-        placeholder="在本包内搜索（Enter 下一个 / Shift+Enter 上一个）"
+        placeholder={hints ? "在本包内搜索（Enter 下一个 / Shift+Enter 上一个）" : ""}
         value={searchQuery}
         onChange={(e) => {
           setSearchQuery(e.target.value);
@@ -765,6 +834,27 @@ export function CodeEditor({
     >
       <div style={{ display: "flex", flex: 1, minHeight: 0, position: "relative", overflow: "hidden" }}>
       {searchBar}
+      {canPrettyJs && (
+        <button
+          onClick={() => setPrettyJs((v) => !v)}
+          style={{
+            position: "absolute",
+            top: showSearch && !persistentSearch ? 36 : 4,
+            right: 4,
+            zIndex: 9,
+            padding: "2px 8px",
+            fontSize: 11,
+            background: prettyJs ? "var(--accent-blue)" : "var(--bg-secondary)",
+            color: prettyJs ? "#fff" : "var(--text-secondary)",
+            border: "1px solid var(--border-default)",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+          title={prettyJs ? "恢复原始内容" : "格式化压缩 JS（同浏览器 DevTools pretty-print，只影响显示，不改原始数据）"}
+        >
+          {prettyJs ? "原始" : "格式化"}
+        </button>
+      )}
 
       <div
         ref={preRef}

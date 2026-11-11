@@ -213,7 +213,7 @@ export function Sidebar() {
         <span style={{ flex: 1 }} />
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <Shield size={11} />
-          v0.9.0
+          v0.9.1
         </span>
       </div>
 

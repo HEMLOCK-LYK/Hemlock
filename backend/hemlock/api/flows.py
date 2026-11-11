@@ -37,6 +37,8 @@ async def list_flows(
     search: str | None = None,
     time_start: str | None = None,
     time_end: str | None = None,
+    exclude_images: bool = False,
+    mime_type: str | None = None,
     db: Session = Depends(get_db),
 ):
     """查询流量列表，支持分页与过滤。
@@ -47,6 +49,8 @@ async def list_flows(
     host 模糊匹配 host 字段。
     tags 非空时仅返回包含标签的流量。
     time_start/time_end（ISO 格式）按流量时间戳过滤范围。
+    exclude_images=True 时排除 mime_type 为 image/* 的流量（列表默认降噪）。
+    mime_type 非空时按 mime_type 模糊匹配（如 "json"、"javascript"）。
     search 参数在所有文本字段（请求头、请求体、响应头、响应体等）中模糊搜索。
     """
     if not project_id:
@@ -59,6 +63,7 @@ async def list_flows(
         host=host, tags_only=bool(tags),
         search=search,
         time_start=time_start, time_end=time_end,
+        exclude_images=exclude_images, mime_type=mime_type,
     )
     # 统计杂包总数（不受 hide_noise 影响）
     noise_count = flow_service.count_noise(db, project_id)

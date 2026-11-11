@@ -2103,8 +2103,9 @@ textarea {
   background: var(--bg-secondary);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  width: 560px;
-  max-width: 90vw;
+  /* 960 宽：技能/角色编辑弹窗用 MarkdownEditor 左右分栏（编辑 + 实时渲染） */
+  width: 960px;
+  max-width: 92vw;
   max-height: 80vh;
   display: flex;
   flex-direction: column;

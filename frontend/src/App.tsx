@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { settingsApi } from "./api/settings";
+import { setHintsEnabled } from "./utils/hints";
 import { Sidebar } from "./components/Sidebar";
 import { SecurityDeclaration, isSecurityAccepted } from "./components/SecurityDeclaration";
 import { FlowList } from "./views/FlowList";
@@ -39,6 +41,14 @@ export default function App() {
   const [splashDismissed, setSplashDismissed] = useState(false);
   const [securityAccepted, setSecurityAccepted] = useState(isSecurityAccepted());
   const location = useLocation();
+
+  // 全局同步输入框引导提示开关（关闭后所有输入框的引导话术消失，设置页保存即时生效）
+  useEffect(() => {
+    settingsApi
+      .get()
+      .then((s) => setHintsEnabled(s.input_hints_enabled ?? true))
+      .catch(() => {});
+  }, []);
 
   // 退出/刷新页面时提示保存临时项目
   useEffect(() => {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { RefreshCw, Search, Inbox, Repeat, Swords, Bot, Power, Wifi, Filter, X, ShieldOff, BarChart3, Tag, Trash2, Settings2, ExternalLink, ChevronDown, ArrowUp, ArrowDown, ArrowUpDown, KeyRound, SlidersHorizontal, Clock, RotateCcw } from "lucide-react";
 import { listFlows, getFlow, getNoiseStats, listNoiseFlows, markFlowNoise, getNoiseAnalysis, clearFlows, migrateFlowAuth } from "../api/flows";
@@ -6,6 +7,7 @@ import type { NoiseAnalysisItem } from "../api/flows";
 import { FLOWTAG_COLORS } from "../api/flowtag";
 import { FlowTagRules } from "./FlowTagRules";
 import { useProject } from "../context/ProjectContext";
+import { useHints } from "../utils/hints";
 import { usePacket } from "../context/PacketContext";
 import type { FlowListResponse, FlowListItem, Flow } from "../types";
 import { MethodBadge, StatusCode, SourceBadge, EmptyState, Spinner } from "../components/Common";
@@ -17,6 +19,52 @@ import apiClient from "../api/client";
 // ===== 列定义（Burp Suite 风格） =====
 
 const COLUMN_STORAGE_KEY = "flowlist_column_widths";
+const FILTER_WIN_POS_KEY = "flowlist_filter_win_pos";
+const EMPTY_FILTERS = { method: "", url: "", host: "", source: "", status: "", time_start: "", time_end: "" };
+
+/** MIME 常见类型 chips（多选，包含匹配） */
+const MIME_CHIPS = [
+  { label: "JSON", value: "json" },
+  { label: "HTML", value: "html" },
+  { label: "JS", value: "javascript" },
+  { label: "CSS", value: "css" },
+  { label: "XML", value: "xml" },
+  { label: "图片", value: "image" },
+  { label: "文本", value: "text" },
+] as const;
+
+/** 流量列表 UI 状态（按项目持久化，进页面自动恢复，不碰全局设置） */
+interface FlowListUiState {
+  filters: { method: string; url: string; host: string; source: string; status: string; time_start: string; time_end: string };
+  excludeImages: boolean;
+  mimeFilter: string;
+  timePreset: string;
+  searchKeyword: string;
+  tagsOnly: boolean;
+  hideNoise: boolean;
+  sortField: string | null;
+  sortDir: string;
+}
+
+const flowListUiKey = (projectId: string | null | undefined) => `flowlist_ui_${projectId || "none"}`;
+
+function loadFlowListUi(projectId: string | null | undefined): Partial<FlowListUiState> | null {
+  try {
+    const raw = localStorage.getItem(flowListUiKey(projectId));
+    if (raw) return JSON.parse(raw) as Partial<FlowListUiState>;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function saveFlowListUi(projectId: string | null | undefined, state: FlowListUiState) {
+  try {
+    localStorage.setItem(flowListUiKey(projectId), JSON.stringify(state));
+  } catch {
+    // ignore
+  }
+}
 const MIN_COL_WIDTH = 40;
 
 interface ColumnDef {
@@ -121,6 +169,7 @@ export function FlowList() {
   const navigate = useNavigate();
   const { currentProjectId } = useProject();
   const { sendToRepeater, sendToIntruder, sendToAI } = usePacket();
+  const hints = useHints();
   const [data, setData] = useState<FlowListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -135,11 +184,36 @@ export function FlowList() {
     time_end: "",
   });
 
-  // ===== 筛选弹窗（点击「筛选」按钮弹出，替代原一排常驻输入框） =====
-  const [filterOpen, setFilterOpen] = useState(false);
-  const filterPopRef = useRef<HTMLDivElement>(null);
+  // ===== MIME 过滤：默认过滤全部图片流量，可在筛选小窗取消 =====
+  const [excludeImages, setExcludeImages] = useState(true);
+  const [mimeFilter, setMimeFilter] = useState("");
+
+  // ===== 筛选独立小窗（草稿式：打开时快照已生效条件，窗内改动落草稿，「确认应用」才提交） =====
+  const [filterDraft, setFilterDraft] = useState<{
+    filters: typeof filters;
+    search: string;
+    timePreset: string;
+    excludeImages: boolean;
+    mimeChips: string[];
+    mimeCustom: string;
+  } | null>(null);
+  // 小窗位置（记住上次拖放位置）
+  const [filterWinPos, setFilterWinPos] = useState<{ left: number; top: number }>(() => {
+    try {
+      const saved = localStorage.getItem(FILTER_WIN_POS_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return { left: 260, top: 120 };
+  });
+  const filterWinPosRef = useRef(filterWinPos);
+  const filterDragRef = useRef<{ startX: number; startY: number; posLeft: number; posTop: number } | null>(null);
   // 时间预设标识：'' = 不限 | '10m' | '1h' | '24h' | '7d' | 'custom'
   const [timePreset, setTimePreset] = useState<string>("");
+
+  // 持久化恢复门闩：uiLoadedFor === currentProjectId 才开始拉数据
+  const [uiLoadedFor, setUiLoadedFor] = useState<string | null>(null);
 
   // 仅看标签开关
   const [tagsOnly, setTagsOnly] = useState(false);
@@ -367,6 +441,7 @@ export function FlowList() {
       setLoading(false);
       return;
     }
+    if (uiLoadedFor !== currentProjectId) return; // 等该项目的持久化 UI 状态恢复完再拉
     setLoading(true);
     setError(null);
     try {
@@ -384,6 +459,8 @@ export function FlowList() {
         search: searchKeyword.trim() || undefined,
         time_start: filters.time_start || undefined,
         time_end: filters.time_end || undefined,
+        exclude_images: excludeImages,
+        mime_type: mimeFilter.trim() || undefined,
       });
       setData(result);
     } catch (e) {
@@ -391,7 +468,7 @@ export function FlowList() {
     } finally {
       setLoading(false);
     }
-  }, [page, filters, currentProjectId, hideNoise, tagsOnly, searchKeyword]);
+  }, [page, filters, currentProjectId, hideNoise, tagsOnly, searchKeyword, excludeImages, mimeFilter, uiLoadedFor]);
 
   // 搜索防抖
   const handleSearchChange = useCallback((value: string) => {
@@ -460,7 +537,7 @@ export function FlowList() {
     setPage(1);
   };
 
-  // ===== 筛选弹窗：时间预设 / 活跃筛选统计 / 弹窗外点击关闭 =====
+  // ===== 筛选小窗：时间预设（提交态，chips 移除用） =====
 
   const TIME_PRESETS: { key: string; label: string; ms: number }[] = [
     { key: "10m", label: "最近10分钟", ms: 10 * 60 * 1000 },
@@ -496,10 +573,91 @@ export function FlowList() {
     setPage(1);
   };
 
+  // ===== 筛选独立小窗：草稿式编辑，「确认应用」才提交生效 =====
+  const openFilterWindow = () => {
+    // 已生效 mime 拆回 chips + 自定义两部分
+    const parts = mimeFilter.split(",").map((s) => s.trim()).filter(Boolean);
+    const chips = parts.filter((p) => MIME_CHIPS.some((c) => c.value === p));
+    const custom = parts.filter((p) => !MIME_CHIPS.some((c) => c.value === p)).join(",");
+    setFilterDraft({
+      filters: { ...filters },
+      search: searchKeyword,
+      timePreset,
+      excludeImages,
+      mimeChips: chips,
+      mimeCustom: custom,
+    });
+  };
+
+  const commitFilterDraft = () => {
+    if (!filterDraft) return;
+    setFilters({ ...filterDraft.filters });
+    handleSearchChange(filterDraft.search);
+    setTimePreset(filterDraft.timePreset);
+    setExcludeImages(filterDraft.excludeImages);
+    setMimeFilter([...filterDraft.mimeChips, filterDraft.mimeCustom.trim()].filter(Boolean).join(","));
+    setFilterDraft(null);
+  };
+
+  const handleDraftChange = (key: string, value: string) => {
+    setFilterDraft((prev) => (prev ? { ...prev, filters: { ...prev.filters, [key]: value } } : prev));
+  };
+
+  const handleDraftTimePreset = (key: string, ms: number) => {
+    setFilterDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            timePreset: key,
+            filters: { ...prev.filters, time_start: new Date(Date.now() - ms).toISOString(), time_end: "" },
+          }
+        : prev
+    );
+  };
+
+  const handleDraftTimeCustom = (which: "start" | "end", localValue: string) => {
+    setFilterDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            timePreset: "custom",
+            filters: {
+              ...prev.filters,
+              [which === "start" ? "time_start" : "time_end"]: localValue ? new Date(localValue).toISOString() : "",
+            },
+          }
+        : prev
+    );
+  };
+
+  const handleDraftClearTime = () => {
+    setFilterDraft((prev) =>
+      prev ? { ...prev, timePreset: "", filters: { ...prev.filters, time_start: "", time_end: "" } } : prev
+    );
+  };
+
+  const handleDraftClearAll = () => {
+    setFilterDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            search: "",
+            timePreset: "",
+            excludeImages: false,
+            mimeChips: [],
+            mimeCustom: "",
+            filters: { method: "", url: "", host: "", source: "", status: "", time_start: "", time_end: "" },
+          }
+        : prev
+    );
+  };
+
   /** 活跃筛选条件（用于按钮徽标与可移除 chips） */
   const activeFilters = useMemo(() => {
     const chips: { key: string; label: string }[] = [];
     if (searchKeyword.trim()) chips.push({ key: "search", label: `关键字: ${searchKeyword.trim()}` });
+    if (excludeImages) chips.push({ key: "exclude_images", label: "已过滤图片" });
+    if (mimeFilter.trim()) chips.push({ key: "mime", label: `MIME: ${mimeFilter.trim()}` });
     if (filters.host) chips.push({ key: "host", label: `Host: ${filters.host}` });
     if (filters.url) chips.push({ key: "url", label: `URL: ${filters.url}` });
     if (filters.method) chips.push({ key: "method", label: filters.method });
@@ -510,7 +668,7 @@ export function FlowList() {
       chips.push({ key: "time", label: preset ? preset.label : "自定义时间" });
     }
     return chips;
-  }, [filters, timePreset, searchKeyword]);
+  }, [filters, timePreset, searchKeyword, excludeImages, mimeFilter]);
   const activeFilterCount = activeFilters.length;
 
   const handleRemoveFilterChip = (key: string) => {
@@ -518,36 +676,108 @@ export function FlowList() {
       handleClearTime();
     } else if (key === "search") {
       handleSearchChange("");
+    } else if (key === "exclude_images") {
+      setExcludeImages(false);
+      setPage(1);
+    } else if (key === "mime") {
+      setMimeFilter("");
+      setPage(1);
     } else {
       handleFilterChange(key, "");
     }
   };
 
-  const handleClearAllFilters = () => {
-    handleSearchChange("");
-    setFilters({ method: "", url: "", host: "", source: "", status: "", time_start: "", time_end: "" });
-    setTimePreset("");
-    setPage(1);
-  };
-
-  // 点击弹窗外关闭筛选弹窗
+  // ===== UI 状态按项目持久化：切项目先恢复再拉数据，进来不重新筛选 =====
   useEffect(() => {
-    if (!filterOpen) return;
-    const handleMouseDown = (e: MouseEvent) => {
-      if (filterPopRef.current && !filterPopRef.current.contains(e.target as Node)) {
-        setFilterOpen(false);
+    const saved = loadFlowListUi(currentProjectId);
+    if (saved) {
+      if (saved.filters) setFilters({ ...EMPTY_FILTERS, ...saved.filters });
+      if (saved.excludeImages !== undefined) setExcludeImages(saved.excludeImages);
+      if (saved.mimeFilter !== undefined) setMimeFilter(saved.mimeFilter);
+      if (saved.timePreset !== undefined) setTimePreset(saved.timePreset);
+      if (saved.searchKeyword !== undefined) setSearchKeyword(saved.searchKeyword);
+      if (saved.tagsOnly !== undefined) setTagsOnly(saved.tagsOnly);
+      if (saved.hideNoise !== undefined) setHideNoise(saved.hideNoise);
+      if (saved.sortField !== undefined) setSortField((saved.sortField as SortField | null) ?? null);
+      if (saved.sortDir !== undefined) setSortDir(saved.sortDir === "desc" ? "desc" : "asc");
+    } else {
+      // 新项目恢复默认（过滤图片为产品默认行为）
+      setFilters({ ...EMPTY_FILTERS });
+      setTimePreset("");
+      setSearchKeyword("");
+      setTagsOnly(false);
+      setHideNoise(false);
+      setSortField(null);
+      setSortDir("asc");
+      setExcludeImages(true);
+      setMimeFilter("");
+    }
+    setPage(1);
+    setUiLoadedFor(currentProjectId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProjectId]);
+
+  // 有变更时写回持久化
+  useEffect(() => {
+    if (!currentProjectId || uiLoadedFor !== currentProjectId) return;
+    saveFlowListUi(currentProjectId, {
+      filters,
+      excludeImages,
+      mimeFilter,
+      timePreset,
+      searchKeyword,
+      tagsOnly,
+      hideNoise,
+      sortField,
+      sortDir,
+    });
+  }, [currentProjectId, uiLoadedFor, filters, excludeImages, mimeFilter, timePreset, searchKeyword, tagsOnly, hideNoise, sortField, sortDir]);
+
+  // Esc 关闭筛选小窗（丢弃草稿）
+  useEffect(() => {
+    if (!filterDraft) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFilterDraft(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [filterDraft]);
+
+  // 小窗标题栏拖拽，松手持久化位置
+  useEffect(() => {
+    if (!filterDraft) return;
+    const onMove = (e: MouseEvent) => {
+      const d = filterDragRef.current;
+      if (!d) return;
+      const left = Math.max(0, Math.min(window.innerWidth - 460, d.posLeft + (e.clientX - d.startX)));
+      const top = Math.max(0, Math.min(window.innerHeight - 120, d.posTop + (e.clientY - d.startY)));
+      setFilterWinPos({ left, top });
+    };
+    const onUp = () => {
+      if (!filterDragRef.current) return;
+      filterDragRef.current = null;
+      try {
+        localStorage.setItem(FILTER_WIN_POS_KEY, JSON.stringify(filterWinPosRef.current));
+      } catch {
+        // ignore
       }
     };
-    const handlePopEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFilterOpen(false);
-    };
-    document.addEventListener("mousedown", handleMouseDown);
-    document.addEventListener("keydown", handlePopEsc);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
     return () => {
-      document.removeEventListener("mousedown", handleMouseDown);
-      document.removeEventListener("keydown", handlePopEsc);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
     };
-  }, [filterOpen]);
+  }, [filterDraft]);
+
+  useEffect(() => {
+    filterWinPosRef.current = filterWinPos;
+  }, [filterWinPos]);
+
+  const startFilterDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    filterDragRef.current = { startX: e.clientX, startY: e.clientY, posLeft: filterWinPos.left, posTop: filterWinPos.top };
+  };
 
   // ===== 方向键切换数据包：上下（及左右）在列表中移动选中项，代替页面滚动 =====
   useEffect(() => {
@@ -562,7 +792,7 @@ export function FlowList() {
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
       }
       // 弹窗/菜单打开时不劫持
-      if (contextMenu || noiseModalOpen || flowtagModalOpen || filterOpen) return;
+      if (contextMenu || noiseModalOpen || flowtagModalOpen || filterDraft) return;
       if (!sortedItems.length) return;
       e.preventDefault();
       const curIdx = sortedItems.findIndex((it) => it.id === selectedFlowId);
@@ -585,7 +815,7 @@ export function FlowList() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [sortedItems, selectedFlowId, handleRowClick, contextMenu, noiseModalOpen, flowtagModalOpen, filterOpen]);
+  }, [sortedItems, selectedFlowId, handleRowClick, contextMenu, noiseModalOpen, flowtagModalOpen, filterDraft]);
 
   // 右键菜单
   const handleContextMenu = (e: React.MouseEvent, item: FlowListItem) => {
@@ -883,17 +1113,17 @@ export function FlowList() {
         </div>
       </div>
 
-      {/* 过滤栏：左侧「筛选」按钮弹出条件面板，激活条件以可移除 chips 展示 */}
+      {/* 过滤栏：左侧「筛选」按钮打开独立小窗，激活条件以可移除 chips 展示 */}
       <div className="filter-bar">
-        <div ref={filterPopRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           <button
             className="btn btn-sm"
-            onClick={() => setFilterOpen((v) => !v)}
+            onClick={() => (filterDraft ? setFilterDraft(null) : openFilterWindow())}
             style={{
               borderColor: activeFilterCount ? "var(--accent-blue)" : undefined,
               color: activeFilterCount ? "var(--accent-blue)" : undefined,
             }}
-            title="按关键字 / Host / URL / 方法 / 状态码 / 来源 / 时间筛选"
+            title="按关键字 / Host / URL / 方法 / 状态码 / 来源 / 时间 / MIME 筛选"
           >
             <SlidersHorizontal size={12} />
             筛选
@@ -922,26 +1152,59 @@ export function FlowList() {
               <X size={10} style={{ flexShrink: 0 }} />
             </span>
           ))}
-          {filterOpen && (
+        </div>
+            {filterDraft &&
+              createPortal(
             <div
               style={{
-                position: "absolute",
-                top: "calc(100% + 8px)",
-                left: 0,
-                zIndex: 600,
-                width: 430,
-                maxWidth: "calc(100vw - 280px)",
-                padding: "14px 16px",
+                position: "fixed",
+                left: filterWinPos.left,
+                top: filterWinPos.top,
+                zIndex: 1000,
+                width: 440,
+                maxWidth: "calc(100vw - 40px)",
                 background: "var(--bg-secondary)",
                 border: "1px solid var(--border-default)",
                 borderRadius: 10,
                 boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
                 display: "flex",
                 flexDirection: "column",
-                gap: 12,
               }}
-              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") {
+                  e.preventDefault();
+                  commitFilterDraft();
+                }
+              }}
             >
+              {/* 标题栏：拖拽移动 */}
+              <div
+                onMouseDown={startFilterDrag}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "8px 12px",
+                  borderBottom: "1px solid var(--border-default)",
+                  background: "var(--bg-tertiary)",
+                  borderRadius: "10px 10px 0 0",
+                  cursor: "move",
+                  userSelect: "none",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
+                  <SlidersHorizontal size={12} />
+                  筛选流量
+                </div>
+                <button
+                  onClick={() => setFilterDraft(null)}
+                  title="关闭（Esc，丢弃未应用改动）"
+                  style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 2 }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+              <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
               {/* 关键字（全字段） */}
               <div>
                 <div className="flow-filter-label">关键字（全字段搜索）</div>
@@ -950,9 +1213,9 @@ export function FlowList() {
                   <input
                     className="input"
                     style={{ width: "100%", paddingLeft: 26, height: 28, fontSize: 12 }}
-                    placeholder="请求头/体、响应内容、URL..."
-                    value={searchKeyword}
-                    onChange={(e) => handleSearchChange(e.target.value)}
+                    placeholder={hints ? "请求头/体、响应内容、URL..." : ""}
+                    value={filterDraft.search}
+                    onChange={(e) => setFilterDraft((prev) => (prev ? { ...prev, search: e.target.value } : prev))}
                     autoFocus
                   />
                 </div>
@@ -964,9 +1227,9 @@ export function FlowList() {
                   <input
                     className="input"
                     style={{ width: "100%", height: 28, fontSize: 12 }}
-                    placeholder="example.com"
-                    value={filters.host}
-                    onChange={(e) => handleFilterChange("host", e.target.value)}
+                    placeholder={hints ? "example.com" : ""}
+                    value={filterDraft.filters.host}
+                    onChange={(e) => handleDraftChange("host", e.target.value)}
                   />
                 </div>
                 <div>
@@ -974,9 +1237,9 @@ export function FlowList() {
                   <input
                     className="input"
                     style={{ width: "100%", height: 28, fontSize: 12 }}
-                    placeholder="/api/login"
-                    value={filters.url}
-                    onChange={(e) => handleFilterChange("url", e.target.value)}
+                    placeholder={hints ? "/api/login" : ""}
+                    value={filterDraft.filters.url}
+                    onChange={(e) => handleDraftChange("url", e.target.value)}
                   />
                 </div>
               </div>
@@ -987,8 +1250,8 @@ export function FlowList() {
                   {["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => (
                     <button
                       key={m}
-                      className={`flow-chip${filters.method === m ? " active" : ""}`}
-                      onClick={() => handleFilterChange("method", filters.method === m ? "" : m)}
+                      className={`flow-chip${filterDraft.filters.method === m ? " active" : ""}`}
+                      onClick={() => handleDraftChange("method", filterDraft.filters.method === m ? "" : m)}
                     >
                       {m}
                     </button>
@@ -1002,8 +1265,8 @@ export function FlowList() {
                   {["200", "301", "302", "403", "404", "500"].map((s) => (
                     <button
                       key={s}
-                      className={`flow-chip${filters.status === s ? " active" : ""}`}
-                      onClick={() => handleFilterChange("status", filters.status === s ? "" : s)}
+                      className={`flow-chip${filterDraft.filters.status === s ? " active" : ""}`}
+                      onClick={() => handleDraftChange("status", filterDraft.filters.status === s ? "" : s)}
                     >
                       {s}
                     </button>
@@ -1012,8 +1275,8 @@ export function FlowList() {
                     className="input"
                     style={{ width: 84, height: 22, fontSize: 11, padding: "0 6px" }}
                     placeholder="自定义"
-                    value={filters.status}
-                    onChange={(e) => handleFilterChange("status", e.target.value.replace(/\D/g, ""))}
+                    value={filterDraft.filters.status}
+                    onChange={(e) => handleDraftChange("status", e.target.value.replace(/\D/g, ""))}
                     title="精确状态码，如 401"
                   />
                 </div>
@@ -1025,8 +1288,8 @@ export function FlowList() {
                   {["proxy", "repeater", "intruder"].map((s) => (
                     <button
                       key={s}
-                      className={`flow-chip${filters.source === s ? " active" : ""}`}
-                      onClick={() => handleFilterChange("source", filters.source === s ? "" : s)}
+                      className={`flow-chip${filterDraft.filters.source === s ? " active" : ""}`}
+                      onClick={() => handleDraftChange("source", filterDraft.filters.source === s ? "" : s)}
                     >
                       {s}
                     </button>
@@ -1043,8 +1306,8 @@ export function FlowList() {
                   {TIME_PRESETS.map((p) => (
                     <button
                       key={p.key}
-                      className={`flow-chip${timePreset === p.key ? " active" : ""}`}
-                      onClick={() => (timePreset === p.key ? handleClearTime() : handleTimePreset(p.key, p.ms))}
+                      className={`flow-chip${filterDraft.timePreset === p.key ? " active" : ""}`}
+                      onClick={() => (filterDraft.timePreset === p.key ? handleDraftClearTime() : handleDraftTimePreset(p.key, p.ms))}
                     >
                       {p.label}
                     </button>
@@ -1055,8 +1318,8 @@ export function FlowList() {
                     type="datetime-local"
                     className="input"
                     style={{ flex: 1, minWidth: 0, height: 26, fontSize: 11 }}
-                    value={isoToLocalInput(filters.time_start)}
-                    onChange={(e) => handleTimeCustom("start", e.target.value)}
+                    value={isoToLocalInput(filterDraft.filters.time_start)}
+                    onChange={(e) => handleDraftTimeCustom("start", e.target.value)}
                     title="起始时间（含）"
                   />
                   <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}>至</span>
@@ -1064,24 +1327,78 @@ export function FlowList() {
                     type="datetime-local"
                     className="input"
                     style={{ flex: 1, minWidth: 0, height: 26, fontSize: 11 }}
-                    value={isoToLocalInput(filters.time_end)}
-                    onChange={(e) => handleTimeCustom("end", e.target.value)}
+                    value={isoToLocalInput(filterDraft.filters.time_end)}
+                    onChange={(e) => handleDraftTimeCustom("end", e.target.value)}
                     title="结束时间（含）"
                   />
                 </div>
               </div>
-              {/* footer */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-subtle)", paddingTop: 10 }}>
-                <button className="btn btn-sm" onClick={handleClearAllFilters} disabled={!activeFilterCount} style={{ fontSize: 11 }}>
-                  <RotateCcw size={11} />
-                  重置全部
-                </button>
-                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>条件即时生效 · Esc 关闭</span>
+                {/* MIME 过滤：常见类型多选 chips + 自定义输入 */}
+                <div>
+                  <div className="flow-filter-label">MIME 类型</div>
+                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
+                    <button
+                      className={`flow-chip${filterDraft.excludeImages ? " active" : ""}`}
+                      onClick={() => setFilterDraft((prev) => (prev ? { ...prev, excludeImages: !prev.excludeImages } : prev))}
+                      title="过滤全部图片流量（mime_type 为 image/*），默认开启，可点击取消"
+                    >
+                      过滤图片
+                    </button>
+                    {MIME_CHIPS.map((c) => (
+                      <button
+                        key={c.value}
+                        className={`flow-chip${filterDraft.mimeChips.includes(c.value) ? " active" : ""}`}
+                        onClick={() =>
+                          setFilterDraft((prev) =>
+                            prev
+                              ? {
+                                  ...prev,
+                                  mimeChips: prev.mimeChips.includes(c.value)
+                                    ? prev.mimeChips.filter((x) => x !== c.value)
+                                    : [...prev.mimeChips, c.value],
+                                }
+                              : prev
+                          )
+                        }
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                    <input
+                      className="input"
+                      style={{ flex: 1, minWidth: 120, height: 22, fontSize: 11, padding: "0 6px" }}
+                      placeholder={hints ? "自定义，逗号分隔" : ""}
+                      value={filterDraft.mimeCustom}
+                      onChange={(e) => setFilterDraft((prev) => (prev ? { ...prev, mimeCustom: e.target.value } : prev))}
+                    />
+                  </div>
+                  {hints && (
+                    <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+                      「过滤图片」默认开启；类型 chips 可多选（包含匹配），自定义关键字与 chips 叠加生效
+                    </div>
+                  )}
+                </div>
+                {/* footer：草稿式编辑，确认应用才提交 */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--border-subtle)", paddingTop: 10 }}>
+                  <button className="btn btn-sm" onClick={handleDraftClearAll} style={{ fontSize: 11 }}>
+                    <RotateCcw size={11} />
+                    重置
+                  </button>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <span style={{ fontSize: 10, color: "var(--text-muted)" }}>Esc 取消</span>
+                    <button className="btn btn-sm" onClick={() => setFilterDraft(null)} style={{ fontSize: 11 }}>
+                      取消
+                    </button>
+                    <button className="btn btn-sm btn-primary" onClick={commitFilterDraft} style={{ fontSize: 11 }}>
+                      确认应用
+                    </button>
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-        <div style={{ flex: 1 }} />
+            </div>,
+              document.body
+            )}
+          <div style={{ flex: 1 }} />
         <div className="filter-divider" />
         <div className="filter-group">
           <button

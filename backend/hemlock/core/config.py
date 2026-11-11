@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     # 默认 200K，推荐 400K。实际触发取 min(本值, 模型窗口 × 0.8)。
     compact_limit_tokens: int = 200_000
 
+    # 输入框引导提示开关：关闭后 Agent 聊天输入框只保留简短操作提示，不再展示使用引导话术
+    input_hints_enabled: bool = True
+
     @property
     def db_url(self) -> str:
         db = Path(self.db_path)

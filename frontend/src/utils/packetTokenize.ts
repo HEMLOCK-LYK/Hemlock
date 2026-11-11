@@ -106,23 +106,31 @@ function detectContentType(headerLines: string[]): string {
   return "";
 }
 
-function autoDetectBodyType(body: string): "json" | "html" | "xml" | "css" | "form" | "text" {
+function autoDetectBodyType(body: string): "json" | "html" | "xml" | "css" | "js" | "form" | "text" {
   const trimmed = body.trim();
   if (!trimmed) return "text";
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return "json";
   if (trimmed.startsWith("<?xml")) return "xml";
   if (trimmed.startsWith("<!DOCTYPE html") || trimmed.startsWith("<html") || /^<div|^<span|^<p|^<a\b/i.test(trimmed)) return "html";
   if (trimmed.startsWith("<")) return "xml";
+  // JS 特征：压缩 JS 常以 !function / (function / var 等开头，或正文含 function(){。
+  // 必须排在 css/form 猜测之前——压缩 JS 一行里到处是 = 且常无 &，会被表单正则误判；
+  // 以 function(a){...} 开头会被 CSS 正则误判。
+  if (
+    /^(?:[!(]?\s*function\s*\(|(?:var|let|const|import|export)\s|["'`]use strict|window\.|document\.|self\.|require\(|define\(|module\.exports)/.test(trimmed) ||
+    /\bfunction\s*[\w$]*\s*\([^)]*\)\s*\{/.test(trimmed)
+  ) return "js";
   if (/^[.#a-zA-Z][\w\s,>.:()*-]*\{[^}]*[:;][^}]*\}/m.test(trimmed) || trimmed.startsWith("@")) return "css";
   if (/^[^=]+=[^&]*(&[^=]+=[^&]*)*$/m.test(trimmed)) return "form";
   return "text";
 }
 
-function getBodyHighlightMode(contentType: string, body: string): "json" | "html" | "xml" | "css" | "form" | "text" {
+function getBodyHighlightMode(contentType: string, body: string): "json" | "html" | "xml" | "css" | "js" | "form" | "text" {
   if (contentType.includes("json")) return "json";
   if (contentType.includes("html")) return "html";
   if (contentType.includes("xml")) return "xml";
   if (contentType.includes("css")) return "css";
+  if (contentType.includes("javascript") || contentType.includes("ecmascript")) return "js";
   if (contentType.includes("urlencoded")) return "form";
   return autoDetectBodyType(body);
 }
@@ -193,6 +201,38 @@ function tokenizeHtmlLike(text: string, isXml: boolean): Segment[] {
     } else {
       // 属性名 — 蓝色
       segments.push({ text: token, color: COLOR.attrName });
+    }
+    lastIndex = regex.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    segments.push({ text: text.slice(lastIndex), color: COLOR.text });
+  }
+  return segments;
+}
+
+// ===== JavaScript 词法分析 =====
+function tokenizeJs(text: string): Segment[] {
+  const segments: Segment[] = [];
+  const regex =
+    /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|\b(var|let|const|function|return|if|else|for|while|do|switch|case|default|break|continue|new|this|typeof|instanceof|in|of|class|extends|super|import|export|from|try|catch|finally|throw|async|await|yield|delete|void|true|false|null|undefined)\b/g;
+  let match: RegExpExecArray | null;
+  let lastIndex = 0;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ text: text.slice(lastIndex, match.index), color: COLOR.text });
+    }
+    if (match[1] !== undefined) {
+      // 注释 — 深绿
+      segments.push({ text: match[1], color: COLOR.htmlComment });
+    } else if (match[2] !== undefined) {
+      // 字符串（含模板字符串） — 绿色
+      segments.push({ text: match[2], color: COLOR.jsonString });
+    } else if (match[3] !== undefined) {
+      // 数字 — 蓝色
+      segments.push({ text: match[3], color: COLOR.jsonNumber });
+    } else if (match[4] !== undefined) {
+      // 关键字 — 深蓝加粗
+      segments.push({ text: match[4], color: COLOR.method, bold: true });
     }
     lastIndex = regex.lastIndex;
   }
@@ -277,7 +317,7 @@ function segmentsToLines(segments: Segment[]): Segment[][] {
  * 检测数据包 body 的内容类型模式。
  * 用于 CodeEditor 决定换行策略：表单数据不换行（同 Burp Suite），JSON/HTML 等可换行。
  */
-export function getPacketBodyMode(content: string): "json" | "html" | "xml" | "css" | "form" | "text" {
+export function getPacketBodyMode(content: string): "json" | "html" | "xml" | "css" | "js" | "form" | "text" {
   if (!content || !content.trim()) return "text";
   let working = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const allLines = working.split("\n");
@@ -516,6 +556,7 @@ export function tokenizePacket(
       case "html": bodySegments = tokenizeHtmlLike(bodyRaw, false); break;
       case "xml": bodySegments = tokenizeHtmlLike(bodyRaw, true); break;
       case "css": bodySegments = tokenizeCss(bodyRaw); break;
+      case "js": bodySegments = tokenizeJs(bodyRaw); break;
       case "form": bodySegments = tokenizeForm(bodyRaw); break;
       default: bodySegments = [{ text: bodyRaw, color: COLOR.text }]; break;
     }

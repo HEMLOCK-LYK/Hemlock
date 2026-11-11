@@ -46,6 +46,7 @@ CONFIGURABLE_KEYS = [
     "sensitive_op_confirm",
     "browser_headed",
     "compact_limit_tokens",
+    "input_hints_enabled",
 ]
 
 # ===== 预设服务商（仅提供 base_url 快捷填充，模型由用户自行输入）=====
@@ -117,6 +118,7 @@ class SettingsResponse(BaseModel):
     sensitive_op_confirm: bool
     browser_headed: bool
     compact_limit_tokens: int
+    input_hints_enabled: bool
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -141,6 +143,7 @@ class SettingsUpdateRequest(BaseModel):
     sensitive_op_confirm: bool | None = None
     browser_headed: bool | None = None
     compact_limit_tokens: int | None = None
+    input_hints_enabled: bool | None = None
 
 
 class ProviderInfo(BaseModel):
@@ -266,6 +269,7 @@ def _build_settings_response(db: Session | None = None) -> SettingsResponse:
         sensitive_op_confirm=merged.get("sensitive_op_confirm", True),
         browser_headed=merged.get("browser_headed", False),
         compact_limit_tokens=merged.get("compact_limit_tokens", 200_000),
+        input_hints_enabled=merged.get("input_hints_enabled", True),
     )
 
 
