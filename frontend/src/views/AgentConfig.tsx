@@ -18,8 +18,7 @@ import {
   Eye,
   Code,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownView } from "../components/MarkdownView";
 import {
   skillsApi,
   mcpApi,
@@ -413,7 +412,6 @@ function SkillsPanel({
                   </div>
                   {viewMode === "rendered" ? (
                     <div
-                      className="agent-chat-msg-markdown"
                       style={{
                         background: "var(--bg-primary)",
                         border: "1px solid var(--border-subtle)",
@@ -423,7 +421,8 @@ function SkillsPanel({
                         overflow: "auto",
                       }}
                     >
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{fullContent || "(空)"}</ReactMarkdown>
+                      {/* 统一 MarkdownView（带代码高亮 + 复制） */}
+                      <MarkdownView content={fullContent || "（空）"} />
                     </div>
                   ) : (
                     <pre
@@ -908,6 +907,8 @@ function SkillFormModal({
   onClose: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 内容 编辑原文 / 渲染预览 切换（弹窗按需挂载，每次打开重置为编辑态）
+  const [contentPreview, setContentPreview] = useState(false);
 
   const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -956,20 +957,55 @@ function SkillFormModal({
             </div>
           </div>
 
-          {/* Markdown 内容编辑器 */}
+          {/* Markdown 内容编辑器（编辑 / 渲染预览切换） */}
           <div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
               <label className="text-xs text-muted">
                 技能内容 (Markdown)
               </label>
-              <button
-                className="btn btn-sm"
-                onClick={() => fileInputRef.current?.click()}
-                title="从 .md 文件导入内容"
-              >
-                <Upload size={10} />
-                导入文件
-              </button>
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <div style={{ display: "flex" }}>
+                  <button
+                    type="button"
+                    onClick={() => setContentPreview(false)}
+                    style={{
+                      padding: "2px 10px",
+                      fontSize: 11,
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "4px 0 0 4px",
+                      background: !contentPreview ? "var(--accent-blue)" : "var(--bg-secondary)",
+                      color: !contentPreview ? "#fff" : "var(--text-secondary)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentPreview(true)}
+                    style={{
+                      padding: "2px 10px",
+                      fontSize: 11,
+                      border: "1px solid var(--border-default)",
+                      borderLeft: "none",
+                      borderRadius: "0 4px 4px 0",
+                      background: contentPreview ? "var(--accent-blue)" : "var(--bg-secondary)",
+                      color: contentPreview ? "#fff" : "var(--text-secondary)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    预览
+                  </button>
+                </div>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="从 .md 文件导入内容"
+                >
+                  <Upload size={10} />
+                  导入文件
+                </button>
+              </div>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -978,30 +1014,50 @@ function SkillFormModal({
                 style={{ display: "none" }}
               />
             </div>
-            <textarea
-              className="input w-full"
-              value={form.content}
-              onChange={(e) => setForm((p) => ({ ...p, content: e.target.value }))}
-              placeholder={
-                "# 技能显示名称\n\n" +
-                "一句话描述技能用途，会注入系统提示词。\n\n" +
-                "## 使用方法\n\n" +
-                "在此编写完整操作指导，Agent 调用 invoke_skill 时会加载此内容。\n\n" +
-                "## 注意事项\n\n" +
-                "- 第一行 H1 标题 = 显示名称\n" +
-                "- H1 后第一段 = 简短描述\n" +
-                "- 完整内容 = 激活时加载的指令"
-              }
-              rows={16}
-              style={{
-                resize: "vertical",
-                fontFamily: "monospace",
-                fontSize: 12,
-                lineHeight: 1.5,
-              }}
-            />
+            {contentPreview ? (
+              <div
+                style={{
+                  background: "var(--bg-primary)",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: "var(--radius-sm)",
+                  padding: 12,
+                  minHeight: 300,
+                  maxHeight: "60vh",
+                  overflow: "auto",
+                }}
+              >
+                {form.content.trim() ? (
+                  <MarkdownView content={form.content} />
+                ) : (
+                  <span className="text-xs text-muted">（暂无内容，切回「编辑」填写）</span>
+                )}
+              </div>
+            ) : (
+              <textarea
+                className="input w-full"
+                value={form.content}
+                onChange={(e) => setForm((p) => ({ ...p, content: e.target.value }))}
+                placeholder={
+                  "# 技能显示名称\n\n" +
+                  "一句话描述技能用途，会注入系统提示词。\n\n" +
+                  "## 使用方法\n\n" +
+                  "在此编写完整操作指导，Agent 调用 invoke_skill 时会加载此内容。\n\n" +
+                  "## 注意事项\n\n" +
+                  "- 第一行 H1 标题 = 显示名称\n" +
+                  "- H1 后第一段 = 简短描述\n" +
+                  "- 完整内容 = 激活时加载的指令"
+                }
+                rows={16}
+                style={{
+                  resize: "vertical",
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                }}
+              />
+            )}
             <div className="text-xs text-muted mt-1">
-              第一行 H1 标题作为显示名称，H1 后第一段作为简短描述
+              第一行 H1 标题作为显示名称，H1 后第一段作为简短描述；`#`/`-` 后需要空格才生效，拿不准切「预览」看效果
             </div>
           </div>
         </div>

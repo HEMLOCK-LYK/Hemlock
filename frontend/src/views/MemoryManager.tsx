@@ -75,6 +75,8 @@ export function MemoryManager() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  // 记忆编辑弹窗：内容 编辑原文 / 渲染预览 切换
+  const [contentPreview, setContentPreview] = useState(false);
 
   // ===== 知识库 =====
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
@@ -155,6 +157,7 @@ export function MemoryManager() {
 
   const openNew = () => {
     setEditor({ ...EMPTY_EDITOR, kb: activeKb, type: activeKb ? "kb" : "feedback" });
+    setContentPreview(false);
     setShowEditor(true);
   };
 
@@ -168,6 +171,7 @@ export function MemoryManager() {
       content: mem.content,
       kb: mem.kb,
     });
+    setContentPreview(false);
     setSelected(null);
     setShowEditor(true);
   };
@@ -924,28 +928,83 @@ export function MemoryManager() {
                 </div>
               </div>
 
-              {/* Content */}
+              {/* Content（编辑 / 渲染预览切换） */}
               <div style={{ marginBottom: 12 }}>
-                <label style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4, display: "block" }}>
-                  内容
-                </label>
-                <textarea
-                  className="input"
-                  placeholder={
-                    !editor.kb
-                      ? "记忆正文...\n\n**Why:** 原因\n**How to apply:** 下次怎么做\n[[关联记忆名称]]"
-                      : "记忆正文..."
-                  }
-                  value={editor.content}
-                  onChange={(e) => setEditor({ ...editor, content: e.target.value })}
-                  style={{
-                    width: "100%",
-                    fontSize: 13,
-                    minHeight: 120,
-                    resize: "vertical",
-                    fontFamily: "inherit",
-                  }}
-                />
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                  <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                    内容
+                  </label>
+                  <div style={{ display: "flex" }}>
+                    <button
+                      type="button"
+                      onClick={() => setContentPreview(false)}
+                      style={{
+                        padding: "2px 10px",
+                        fontSize: 11,
+                        border: "1px solid var(--border-default)",
+                        borderRadius: "4px 0 0 4px",
+                        background: !contentPreview ? "var(--accent-blue)" : "var(--bg-secondary)",
+                        color: !contentPreview ? "#fff" : "var(--text-secondary)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setContentPreview(true)}
+                      style={{
+                        padding: "2px 10px",
+                        fontSize: 11,
+                        border: "1px solid var(--border-default)",
+                        borderLeft: "none",
+                        borderRadius: "0 4px 4px 0",
+                        background: contentPreview ? "var(--accent-blue)" : "var(--bg-secondary)",
+                        color: contentPreview ? "#fff" : "var(--text-secondary)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      预览
+                    </button>
+                  </div>
+                </div>
+                {contentPreview ? (
+                  <div
+                    style={{
+                      background: "var(--bg-primary)",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: 4,
+                      padding: 10,
+                      minHeight: 120,
+                      maxHeight: 320,
+                      overflow: "auto",
+                    }}
+                  >
+                    {editor.content.trim() ? (
+                      <MarkdownView content={editor.content} />
+                    ) : (
+                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>（暂无内容，切回「编辑」填写）</span>
+                    )}
+                  </div>
+                ) : (
+                  <textarea
+                    className="input"
+                    placeholder={
+                      !editor.kb
+                        ? "记忆正文...\n\n**Why:** 原因\n**How to apply:** 下次怎么做\n[[关联记忆名称]]"
+                        : "记忆正文..."
+                    }
+                    value={editor.content}
+                    onChange={(e) => setEditor({ ...editor, content: e.target.value })}
+                    style={{
+                      width: "100%",
+                      fontSize: 13,
+                      minHeight: 120,
+                      resize: "vertical",
+                      fontFamily: "inherit",
+                    }}
+                  />
+                )}
                 {!editor.kb && (
                   <div style={{ fontSize: 11, color: "var(--accent-yellow)", marginTop: 4 }}>
                     经验类记忆建议包含 Why（原因）和 How to apply（下次怎么做）

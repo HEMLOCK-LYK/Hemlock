@@ -23,9 +23,6 @@ import {
   ShieldAlert,
   FileText,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { agentApi, agentChatApi } from "../api/agent";
 import { settingsApi } from "../api/settings";
@@ -33,7 +30,7 @@ import { collabApi, type RoleSummary } from "../api/collab";
 import { llmProvidersApi, type LLMProvider } from "../api/llmProviders";
 import { useProject } from "../context/ProjectContext";
 import { usePacket } from "../context/PacketContext";
-import { CodeBlockWrapper } from "../components/MarkdownView";
+import { MarkdownView } from "../components/MarkdownView";
 import type {
   TaskSummary,
   TaskResponse,
@@ -2609,38 +2606,8 @@ const MessageRenderer = memo(function MessageRenderer({ message, onFlowClick }: 
         <Bot size={18} />
       </div>
       <div className="agent-chat-msg-bubble agent-chat-bubble-agent">
-        <div className="agent-chat-msg-markdown">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={[rehypeHighlight]}
-            components={{
-              pre: ({ children }) => <CodeBlockWrapper>{children}</CodeBlockWrapper>,
-              code: ({ className, children, ...props }) => {
-                const isInline = !className;
-                return isInline ? (
-                  <code className="md-code-inline" {...props}>{children}</code>
-                ) : (
-                  <code className={className} {...props}>{children}</code>
-                );
-              },
-              table: ({ children }) => <table className="md-table">{children}</table>,
-              th: ({ children }) => <th className="md-th">{children}</th>,
-              td: ({ children }) => <td className="md-td">{children}</td>,
-              // 检测包含 ASCII 框线字符的段落，使用等宽字体保持对齐
-              p: ({ children, ...props }) => {
-                const text = typeof children === "string" ? children : "";
-                const hasBoxChars = /[│┌┐└┘├┤┬┴┼─━┃┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬↑↓←→]/.test(text);
-                return hasBoxChars ? (
-                  <p className="md-ascii-art" {...props}>{children}</p>
-                ) : (
-                  <p {...props}>{children}</p>
-                );
-              },
-            }}
-          >
-            {message.content}
-          </ReactMarkdown>
-        </div>
+        {/* 统一 MarkdownView：与全应用 markdown 渲染同款配置（代码高亮+复制、表格、ASCII 框线等宽） */}
+        <MarkdownView content={message.content} />
       </div>
     </div>
   );
@@ -2684,35 +2651,8 @@ const ThinkingMessage = memo(function ThinkingMessage({ content, streaming, id }
             /* 流式中用纯文本渲染：避免每 150ms 对累计的整段思考做 markdown 解析(O(n²))，长思考链不卡顿 */
             <div className="thinking-stream-text">{content}</div>
           ) : (
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={{
-                pre: ({ children }) => <CodeBlockWrapper>{children}</CodeBlockWrapper>,
-                code: ({ className, children, ...props }) => {
-                  const isInline = !className;
-                  return isInline ? (
-                    <code className="md-code-inline" {...props}>{children}</code>
-                  ) : (
-                    <code className={className} {...props}>{children}</code>
-                  );
-                },
-                table: ({ children }) => <table className="md-table">{children}</table>,
-                th: ({ children }) => <th className="md-th">{children}</th>,
-                td: ({ children }) => <td className="md-td">{children}</td>,
-                p: ({ children, ...props }) => {
-                  const text = typeof children === "string" ? children : "";
-                  const hasBoxChars = /[│┌┐└┘├┤┬┴┼─━┃┏┓┗┛┣┫┳┻╋═║╔╗╚╝╠╣╦╩╬↑↓←→]/.test(text);
-                  return hasBoxChars ? (
-                    <p className="md-ascii-art" {...props}>{children}</p>
-                  ) : (
-                    <p {...props}>{children}</p>
-                  );
-                },
-              }}
-            >
-              {content}
-            </ReactMarkdown>
+            /* 流式结束后的完整思考用统一 MarkdownView 渲染 */
+            <MarkdownView content={content} />
           )}
         </div>
       </div>
